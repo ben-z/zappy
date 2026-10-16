@@ -2,7 +2,7 @@
   "name": "zappy",
   "private": true,
   "version": "1.0.0",
-  "description": "Privacy-conscious, read-only Tesla Fleet API toolkit and OAuth callback site",
+  "description": "Private local Tesla dashboard, read-only Fleet API toolkit, and OAuth callback site",
   "engines": { "node": ">=22" },
   "scripts": {
     "test": "node --test",
@@ -10,6 +10,8 @@
     "check": "npm test && npm run privacy",
     "demo": "node scripts/zappy.cjs demo",
     "zappy": "node scripts/zappy.cjs",
-    "login": "node scripts/oauth-login.cjs"
+    "login": "node scripts/oauth-login.cjs",
+    "dashboard": "node scripts/dashboard-server.cjs",
+    "dashboard:demo": "node scripts/dashboard-server.cjs --demo --port 8767"
   }
 }

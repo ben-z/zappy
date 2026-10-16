@@ -81,3 +81,20 @@ Deleting a file or rewriting history does not make a previously exposed secret s
 Review the commit history and Pages output, and revoke app access from Tesla account
 security if needed. Replacing a registered signing key may require partner
 registration updates and vehicle re-pairing; do not rotate it casually.
+
+
+## Local dashboard
+
+The optional dashboard binds to loopback only, with strict Host validation,
+same-origin POST checks, a per-process CSRF token, allowlisted static assets,
+no-store responses, and a restrictive Content Security Policy. API and snapshot
+responses are normalized before reaching the browser. Tokens and credentials
+never enter the frontend. Page loads read only the in-memory cache; live Tesla
+reads require a manual action. There is no automatic polling or car wake.
+
+This is a single-user local tool, not an Internet-facing authenticated service.
+Do not expose it through a tunnel or publish a cache, screenshot, or snapshot from
+live mode. No browser storage is used for real telemetry; a running page still
+contains sensitive battery/status/timing information in memory. Demo mode is
+explicitly synthetic and is the only mode suitable for public screenshots.
+See [dashboard security and operation](docs/dashboard.md).

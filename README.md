@@ -7,6 +7,17 @@ Node.js 22+, standard library only, no dependencies. Real tokens and telemetry s
 local; public examples use synthetic data. No background polling, wakes, commands,
 location collection, or public telemetry dashboard.
 
+## Private dashboard
+
+```sh
+npm run dashboard       # http://localhost:8766/, manual live refresh only
+npm run dashboard:demo  # http://localhost:8767/, synthetic offline preview
+```
+
+A local garage overview, interactive charging planner, and private snapshot
+comparison UI. Real telemetry stays on your machine, not GitHub Pages. No
+background polling or automatic wakes. [Dashboard guide](docs/dashboard.md).
+
 ## Quick start
 
 ```sh
