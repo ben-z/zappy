@@ -5,7 +5,23 @@ browser redirects to the private Zappy app at the fixed origin
 `https://zappy.benzhang.dev`. It exists so the OAuth provider can be given a
 public redirect URI while the app itself stays private.
 
-No build step, no dependencies, no secrets. Plain HTML, one JS file, one CSS file.
+No build step, no dependencies, no published secrets. Plain HTML, one JS file, one CSS file.
+
+## Setup status (2026-10-15)
+
+- GitHub repository `ben-z/zappy` is public and deploys `main` from `/ (root)`.
+- Custom domain `zappy-auth.benzhang.dev` is verified on GitHub account `ben-z`.
+- Cloudflare has the DNS-only CNAME to `ben-z.github.io` and the GitHub ownership TXT.
+- GitHub's HTTPS certificate is active and HTTPS is enforced.
+- Tesla developer application **Zappy** was approved and is **Active**.
+- Enabled app capabilities: Vehicle Information, Vehicle Location, Vehicle Commands,
+  Vehicle Charging Management, Energy Product Information, Energy Product Commands.
+  Profile Information was left unchecked.
+- Optional billing details were skipped. Future Fleet API usage can have charges;
+  this setup does not configure a billing payment method or start polling.
+- North America partner registration succeeded and the registered public key was verified.
+- No private app exists yet. The callback destinations are reserved for that future app.
+  No owner OAuth login, vehicle pairing, vehicle commands, or energy controls were performed.
 
 ## Routes
 
@@ -94,10 +110,28 @@ It is git-ignored and is NOT recoverable by cloning this public repo. Back it up
 a secret manager and securely deploy it to the private app or Tesla Vehicle Command
 Proxy before using vehicle commands. Never upload the private key to Pages.
 
-After Tesla issues the app's client credentials, obtain a partner token and register
-the application in the appropriate region with `domain: zappy-auth.benzhang.dev`.
-The registration domain must share the root domain of the allowed origin. Official
-references:
+The app's client credentials are stored only on the setup Mac at
+`~/Projects/zappy/.local/tesla-credentials.json`, with owner-only permissions.
+The `.local` directory itself is owner-only and excluded from git. Back these up
+securely; do not copy them into Pages or a future browser frontend.
+
+North America onboarding is complete for `domain: zappy-auth.benzhang.dev` and
+`audience: https://fleet-api.prd.na.vn.cloud.tesla.com`. A verification report is
+stored in `.local/partner-registration.json` (not committed).
+
+The non-secret helper `scripts/register-partner.cjs` can repeat onboarding or verify
+an existing registration. It reads local credentials, keeps the token in memory,
+redacts credentials from output, and never authorizes a vehicle or sends commands:
+
+```
+node scripts/register-partner.cjs --verify-only
+# For a fresh registration only:
+node scripts/register-partner.cjs
+```
+
+Registration is required separately in any other region where the app will operate.
+The helper currently targets North America only. The registration domain must share
+the root domain of the allowed origin. Official references:
 
 - https://developer.tesla.com/docs/fleet-api/authentication/partner-tokens
 - https://developer.tesla.com/docs/fleet-api/endpoints/partner-endpoints
