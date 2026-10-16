@@ -153,3 +153,34 @@ Covers the pure `computeRedirect(flow, search)` helper (whitelisting, duplicates
 missing params, encoding, fixed destination), the `run()` flow with fake window objects
 (history cleared before `replace`, no echoing of values), and static hardening checks
 (CNAME, `.nojekyll`, CSP, referrer meta, no external URLs or inline scripts).
+
+## OAuth login helper (local)
+
+`scripts/oauth-login.cjs` runs the Tesla Fleet API authorization-code + PKCE flow on
+your machine and stores the resulting tokens locally. It uses only the Node standard
+library.
+
+```
+node scripts/oauth-login.cjs [--timeout-seconds N]
+```
+
+1. Reads `.local/tesla-credentials.json` (`client_id`, `client_secret`) at runtime.
+2. Listens on `127.0.0.1:8765` only and prints `http://localhost:8765/`.
+3. Opening that link redirects the browser to `https://auth.tesla.com/oauth2/v3/authorize`
+   (callback `http://localhost:8765/oauth-signin-redirect`, which must be an allowed
+   redirect URI for the Tesla app). Scope is fixed to
+   `openid offline_access vehicle_device_data` (read-only).
+4. On the callback it checks state (constant-time), exchanges the code once at
+   `https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token` (audience
+   `https://fleet-api.prd.na.vn.cloud.tesla.com`, PKCE verifier), writes
+   `.local/oauth-tokens.json` (mode 600, directory 700, atomic; contains
+   `access_token`, `refresh_token`, `issued_at`, `expires_at`, `scope`; `id_token`
+   is discarded), then shuts down. It also shuts down on a valid provider error or
+   after the timeout (default 10 minutes).
+
+Safety notes: non-loopback `Host` headers, non-GET methods, duplicate or ambiguous
+parameters and mismatched state are rejected; callback pages are static (no echoed
+input) with `no-store`, `no-referrer` and `default-src 'none'`. Credentials, codes,
+state, verifier, authorization URL, callback URLs and tokens are never logged. The
+helper makes no vehicle API requests, wakes, or commands. Tests (`test/oauth.test.js`)
+mock the token fetch, use temp directories and an ephemeral port.
