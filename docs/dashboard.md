@@ -19,6 +19,25 @@ vehicles. The latest response is cached in the server process until the next man
 refresh; it is not a continuously updating stream. Restarting the server clears
 that cache. Stop the server with Ctrl-C.
 
+### Startup messages
+
+Running `npm run dashboard` again recognizes an existing Zappy instance on the same
+port, prints its URL, and exits successfully instead of hiding the cause behind a
+generic failure. It does not start or stop another server. If you changed backend
+code, stop the old instance before starting the updated one.
+
+If a different service or a different Zappy mode occupies the port, the command
+says so and suggests an explicit alternative, for example:
+
+```sh
+npm run dashboard -- --port 8768
+```
+
+Permission and networking failures also show the bind address and a useful next
+step, without exposing raw errors or provider responses. The `/api/health` route
+only identifies the local dashboard and mode; it does not read Tesla or return
+credentials, CSRF tokens, or vehicle data.
+
 If authorization expires, the existing Fleet client attempts safe token renewal.
 If owner consent is missing or revoked, run `npm run login` in another terminal.
 Stop active refresh operations before reauthorizing; see [token recovery](../SECURITY.md).
@@ -36,13 +55,15 @@ screenshots as public examples even though the UI hides direct identifiers.
 
 ## What it does
 
-- **Garage overview:** ordinal vehicle labels, battery state, charge limit, power,
-  reported range estimate, and charging status. Asleep/offline cars do not receive
+- **Garage overview:** compact ordinal vehicle cards with battery state, charge
+  limit, reported power, range estimate, and charging status. All values are cached
+  and labelled with their fetch time, not advertised as a continuously live feed. Asleep/offline cars do not receive
   a live-data call and have unavailable charge fields rather than invented values.
-- **Charging lab:** an offline, interactive charging-time and cost calculator.
-  Capacity, input power, efficiency, and tariff are your assumptions. Using a
-  selected vehicle's battery percentage does not infer its capacity or tariff.
-- **Snapshots:** capture the selected vehicle's normalized private snapshot and
+- **Charging estimate:** an optional, collapsed offline calculator. Current charge,
+  capacity, input power, and optional price start blank. No estimate is shown until
+  sufficient assumptions are entered. Using a selected cached battery percentage
+  does not infer capacity, input power, or tariff. Model details are expandable.
+- **Snapshots:** an optional collapsed tool to capture the selected vehicle's normalized private snapshot and
   compare it with the previous snapshot for that ordinal. Real records remain in
   `.local/snapshots/`; keyed private fingerprints prevent cross-vehicle comparisons
   when list order changes. The UI does not show the fingerprint or any VIN.
