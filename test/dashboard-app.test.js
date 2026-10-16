@@ -254,8 +254,6 @@
     assert.equal(app.get('snapshot-vehicle').value, '2');
     assert.equal(app.cards().length, 3);
     assert.ok(firstCards.every((card) => !app.cards().includes(card)));
-    const gradientIDs = app.cards().map((card) => card.querySelector('linearGradient').id);
-    assert.equal(new Set(gradientIDs).size, 3);
     assert.deepEqual(app.cards().map((card) => card.querySelector('.vehicle-name').textContent), ['Vehicle 3', 'Vehicle 2', 'Vehicle 1']);
     app.enqueue(garage(1));
     await app.get('refresh-button').click();
@@ -276,7 +274,6 @@
     assert.equal(app.get('planner-vehicle').options.length, 20);
     assert.equal(app.get('snapshot-vehicle').options[19].textContent, 'Vehicle 20');
     assert.equal(app.get('online-count').textContent, '20 of 20');
-    assert.equal(new Set(app.cards().map((card) => card.querySelector('linearGradient').id)).size, 20);
   });
 
   test('sidebar active class and aria-current track initial hash and subsequent hash changes', async () => {
@@ -291,7 +288,14 @@
       }
     }
     check('#charging-lab');
+    assert.equal(app.get('planner-tools').getAttribute('open'), '');
+    assert.equal(app.get('snapshot-tools').getAttribute('open'), null);
     for (const hash of ['#snapshots', '#privacy', '#overview']) { await app.hash(hash); check(hash); }
+    assert.equal(app.get('snapshot-tools').getAttribute('open'), '');
+    assert.equal(app.get('privacy-tools').getAttribute('open'), '');
+    app.get('planner-tools').removeAttribute('open');
+    await links.find((link) => link.getAttribute('href') === '#charging-lab').click();
+    assert.equal(app.get('planner-tools').getAttribute('open'), '');
     assert.equal(app.calls.length, 1);
   });
 
@@ -318,9 +322,21 @@
     assert.equal(manual.options.body, '{}');
   });
 
-  test('planner default assumptions yield 30 / 33.33 kWh, 4 hr 38 min and 8.33 price units', async () => {
+  test('planner starts neutral without invented inputs or an estimate', async () => {
     const app = await boot();
-    for (const [id, value] of Object.entries({ 'current-percent': '40', 'target-percent': '80', capacity: '75', power: '7.2', efficiency: '90', price: '0.25' })) assert.equal(app.get(id).value, value);
+    for (const id of ['current-percent', 'capacity', 'power', 'price']) assert.equal(app.get(id).value, '');
+    assert.equal(app.get('target-percent').value, '80');
+    assert.equal(app.get('efficiency').value, '90');
+    assert.equal(app.get('result-time').textContent, 'Enter charging assumptions');
+    assert.equal(app.get('planner-error').hidden, true);
+    for (const id of ['current-percent', 'capacity', 'power']) assert.equal(app.get(id).getAttribute('aria-invalid'), null);
+    for (const id of ['planner-tools', 'snapshot-tools', 'privacy-tools']) assert.equal(app.get(id).getAttribute('open'), null);
+    assert.equal(app.get('garage-status').hidden, false);
+  });
+
+  test('explicit planner assumptions yield 30 / 33.33 kWh, 4 hr 38 min and 8.33 price units', async () => {
+    const app = await boot();
+    for (const [id, value] of Object.entries({ 'current-percent': '40', 'target-percent': '80', capacity: '75', power: '7.2', efficiency: '90', price: '0.25' })) await app.input(id, value);
     assert.equal(app.get('result-battery').textContent, '30 kWh');
     assert.equal(app.get('result-grid').textContent, '33.33 kWh');
     assert.equal(app.get('result-time').textContent, '4 hr 38 min');
@@ -330,12 +346,13 @@
     assert.equal(app.get('planner-error').hidden, false);
     assert.equal(app.get('target-percent').getAttribute('aria-invalid'), 'true');
     assert.match(app.get('planner-error').textContent, /at least current charge/);
-    for (const id of ['result-time', 'result-battery', 'result-grid', 'result-cost']) assert.equal(app.get(id).textContent, 'Not available');
+    assert.equal(app.get('result-time').textContent, 'Check inputs');
+    for (const id of ['result-battery', 'result-grid', 'result-cost']) assert.equal(app.get(id).textContent, 'Not calculated');
     await app.input('target-percent', 40);
     assert.equal(app.get('result-time').textContent, '0 min');
     assert.equal(app.get('result-battery').textContent, '0 kWh');
     await app.input('price', '');
-    assert.equal(app.get('result-cost').textContent, 'No price entered');
+    assert.equal(app.get('result-cost').textContent, 'Add a price for cost');
   });
 
   test('cached battery only prefills on explicit button; independent capacity and grid power never change', async () => {
@@ -345,11 +362,11 @@
     const app = await boot(data);
     app.get('planner-vehicle').value = '3';
     await app.get('planner-vehicle').dispatch('change');
-    assert.equal(app.get('current-percent').value, '40');
+    assert.equal(app.get('current-percent').value, '');
     await app.get('use-battery').click();
     assert.equal(app.get('current-percent').value, '52');
-    assert.equal(app.get('capacity').value, '75');
-    assert.equal(app.get('power').value, '7.2');
+    assert.equal(app.get('capacity').value, '');
+    assert.equal(app.get('power').value, '');
     assert.equal(app.get('efficiency').value, '90');
     assert.match(app.get('prefill-status').textContent, /Cached battery from Vehicle 3/);
     assert.match(app.get('prefill-status').textContent, /remain assumptions/);
@@ -394,16 +411,6 @@
     assert.ok(!app.bodyReads.includes(429));
   });
 
-  test('server reading timestamps, when present, are labeled separately from local capture time', async () => {
-    const app = await boot(garage(1));
-    app.enqueue({ snapshot: { fetched_at: '2026-01-02T03:04:05Z' }, comparison: null, note: '' });
-    await app.get('capture-button').click();
-    const status = app.get('snapshot-status').textContent;
-    assert.match(status, /^Captured locally · /);
-    assert.match(status, /Server reading timestamp · /);
-    assert.ok(status.includes(new TestDate('2026-01-02T03:04:05Z').toLocaleString(undefined, localeOptions)));
-    assert.ok(status.includes(new TestDate().toLocaleString(undefined, localeOptions)));
-  });
 
   test('HTTP, connection and malformed JSON errors use static safe hints, never raw response details', async () => {
     const privateMarker = 'SYNTHETIC_PRIVATE_OWNER_VIN_ADDRESS';
@@ -430,13 +437,57 @@
   test('unknown/asleep values stay unavailable; extra backend identity fields never render', async () => {
     const app = await boot(garage(1, { vehicles: [vehicle(1, { state: 'asleep', battery_percent: null, charge_limit_percent: null, charging_state: null, charger_power_kw: null, estimated_range_km: null, time_to_full_charge_hours: null, vin: 'SYNTHETIC_PRIVATE_VIN', display_name: 'SYNTHETIC_PRIVATE_NAME', location: 'SYNTHETIC_PRIVATE_ADDRESS' })] }));
     const card = app.cards()[0];
-    for (const selector of ['.battery-number', '.vehicle-range', '.vehicle-power', '.vehicle-time']) assert.equal(card.querySelector(selector).textContent, 'Not available');
-    assert.equal(card.querySelector('.vehicle-state').textContent, 'Asleep');
+    for (const selector of ['.battery-number', '.vehicle-range', '.vehicle-power', '.vehicle-time']) assert.equal(card.querySelector(selector).textContent, 'Not reported');
+    assert.equal(card.querySelector('.vehicle-state').textContent, 'Last reported: asleep');
     assert.doesNotMatch(app.visibleText(), /SYNTHETIC_PRIVATE_/);
     await app.get('use-battery').click();
-    assert.equal(app.get('current-percent').value, '40');
+    assert.equal(app.get('current-percent').value, '');
   });
 
+
+  test('successful cache loads and refreshes hide notices; cached state and raw provider ETA are explicit', async () => {
+    const data = garage(3);
+    data.vehicles[1].charging_state = 'Disconnected';
+    data.vehicles[1].time_to_full_charge_hours = 9;
+    data.vehicles[2].charging_state = 'Charging';
+    data.vehicles[2].time_to_full_charge_hours = null;
+    const app = await boot(data);
+    assert.equal(app.get('garage-status').hidden, true);
+    assert.equal(app.cards()[0].querySelector('.vehicle-state').textContent, 'Last reported: online');
+    assert.equal(app.cards()[0].querySelector('.vehicle-time').textContent, '1 hr 30 min');
+    assert.equal(app.cards()[1].querySelector('.vehicle-time').textContent, 'Not charging');
+    assert.equal(app.cards()[2].querySelector('.vehicle-time').textContent, 'Not reported');
+    assert.match(app.cards()[0].querySelector('.vehicle-updated').textContent, /^Fetched /);
+    app.enqueue(data);
+    await app.get('refresh-button').click();
+    assert.equal(app.get('garage-status').hidden, true);
+    app.enqueue({}, 500);
+    await app.get('refresh-button').click();
+    assert.equal(app.get('garage-status').hidden, false);
+  });
+
+  test('planner validates invalid ranges after interaction', async () => {
+    const app = await boot();
+    await app.input('capacity', -1);
+    assert.equal(app.get('planner-error').hidden, false);
+    assert.equal(app.get('capacity').getAttribute('aria-invalid'), 'true');
+    assert.equal(app.get('result-time').textContent, 'Check inputs');
+  });
+  test('unfinished planner fields stay neutral during battery prefill and entry', async () => {
+    const app = await boot(garage(1));
+    await app.get('use-battery').click();
+    assert.equal(app.get('planner-error').hidden, true);
+    assert.equal(app.get('capacity').getAttribute('aria-invalid'), null);
+    assert.equal(app.get('power').getAttribute('aria-invalid'), null);
+    assert.equal(app.get('result-time').textContent, 'Enter charging assumptions');
+    await app.input('capacity', '75');
+    assert.equal(app.get('planner-error').hidden, true);
+    await app.input('power', '7.2');
+    assert.notEqual(app.get('result-time').textContent, 'Enter charging assumptions');
+    await app.input('capacity', '');
+    assert.equal(app.get('planner-error').hidden, true);
+    assert.equal(app.get('result-time').textContent, 'Enter charging assumptions');
+  });
   test('demo stays explicitly synthetic and app never accesses browser storage or unsafe HTML APIs', async () => {
     const app = await boot(garage(2), { mode: 'demo' });
     assert.equal(app.get('mode-banner').hidden, false);

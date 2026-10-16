@@ -2,7 +2,7 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
-  const missing = 'Not available';
+  const missing = 'Not reported';
   const state = { csrf: null, mode: null, garage: null, entries: [], busy: false, comparisons: new Map() };
   const chargingLabels = { Charging: 'Charging', Complete: 'Complete', Disconnected: 'Disconnected', Stopped: 'Stopped', NoPower: 'No power', Starting: 'Starting' };
   const number = (value) => typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -29,6 +29,8 @@
   const navLinks = Array.from(document.querySelectorAll('.navigation .nav-link'));
   function updateNavigation() {
     const hash = window.location.hash || '#overview';
+    const detailIds = { '#charging-lab': 'planner-tools', '#snapshots': 'snapshot-tools', '#privacy': 'privacy-tools' };
+    if (detailIds[hash]) $(detailIds[hash]).setAttribute('open', '');
     navLinks.forEach((link) => {
       const active = link.getAttribute('href') === hash;
       link.classList.toggle('is-active', active);
@@ -37,6 +39,11 @@
     });
   }
   window.addEventListener('hashchange', updateNavigation);
+  navLinks.forEach((link) => link.addEventListener('click', () => {
+    const section = $(link.getAttribute('href').slice(1));
+    const details = section?.querySelector('details');
+    if (details) details.setAttribute('open', '');
+  }));
   updateNavigation();
 
   function renderVehicleSelects() {
@@ -81,16 +88,13 @@
       const clone = $('vehicle-template').content.cloneNode(true);
       const card = clone.querySelector('.vehicle-card');
       card.querySelector('.vehicle-name').textContent = `Vehicle ${ordinal}`;
-      card.querySelector('.vehicle-label').textContent = `GARAGE / ${String(ordinal).padStart(2, '0')}`;
-      card.querySelector('linearGradient').id = `car-body-${ordinal}`;
-      card.querySelector('.car-body').setAttribute('fill', `url(#car-body-${ordinal})`);
       card.querySelector('.battery-progress').setAttribute('aria-label', `Vehicle ${ordinal} battery charge`);
       const unavailable = !vehicle || vehicle.error === 'unavailable';
       const battery = unavailable ? null : bounded(vehicle.battery_percent, 0, 100);
       const limit = unavailable ? null : bounded(vehicle.charge_limit_percent, 0, 100);
       const vehicleState = vehicle?.state === 'online' ? 'Online' : vehicle?.state === 'asleep' ? 'Asleep' : missing;
       const stateBadge = card.querySelector('.vehicle-state');
-      stateBadge.textContent = vehicleState;
+      stateBadge.textContent = vehicleState === missing ? 'State not reported' : `Last reported: ${vehicleState.toLowerCase()}`;
       stateBadge.classList.toggle('is-online', vehicleState === 'Online' && !unavailable);
       stateBadge.classList.toggle('is-asleep', vehicleState === 'Asleep');
       const batteryLabel = card.querySelector('.battery-number');
@@ -100,12 +104,11 @@
       const progress = card.querySelector('.battery-progress');
       progress.value = battery ?? 0;
       progress.setAttribute('aria-valuetext', battery === null ? missing : `${format(battery)} percent`);
-      card.querySelector('.arc-fill').setAttribute('stroke-dasharray', `${battery ?? 0} 100`);
       const marker = card.querySelector('.limit-marker line');
       marker.setAttribute('visibility', limit === null ? 'hidden' : 'visible');
       marker.setAttribute('x1', String(limit ?? 0));
       marker.setAttribute('x2', String(limit ?? 0));
-      card.querySelector('.charge-limit').textContent = limit === null ? 'Limit not available' : `Limit ${format(limit)}%`;
+      card.querySelector('.charge-limit').textContent = limit === null ? 'Charge limit not reported' : `Charge limit ${format(limit)}%`;
       const charging = unavailable ? null : chargingLabel(vehicle.charging_state);
       const chargingElement = card.querySelector('.charging-state');
       chargingElement.textContent = charging ?? missing;
@@ -113,10 +116,10 @@
       const range = unavailable ? null : bounded(vehicle.estimated_range_km, 0, 10000);
       const power = unavailable ? null : bounded(vehicle.charger_power_kw, 0, 10000);
       const time = unavailable ? null : bounded(vehicle.time_to_full_charge_hours, 0, 10000);
-      const metrics = [['.vehicle-range', range === null ? missing : `${format(range)} km`], ['.vehicle-power', power === null ? missing : `${format(power)} kW`], ['.vehicle-time', duration(time)]];
+      const metrics = [['.vehicle-range', range === null ? missing : `${format(range)} km`], ['.vehicle-power', power === null ? missing : `${format(power)} kW`], ['.vehicle-time', charging === 'Disconnected' || charging === 'Stopped' || charging === 'Complete' || charging === 'No power' ? 'Not charging' : duration(time)]];
       metrics.forEach(([selector, text]) => { const element = card.querySelector(selector); element.textContent = text; element.classList.toggle('is-unavailable', text === missing); });
       const timestamp = dateText(vehicle?.fetched_at);
-      card.querySelector('.vehicle-updated').textContent = unavailable && vehicle ? `Reading unavailable${timestamp ? ` · last reported ${timestamp}` : ''}` : timestamp ? `Fetched ${timestamp}` : 'No reading yet';
+      card.querySelector('.vehicle-updated').textContent = unavailable && vehicle ? `Reading unavailable${timestamp ? ` · fetched ${timestamp}` : ''}` : timestamp ? `Fetched ${timestamp}` : 'No reading yet';
       fragment.append(clone);
     });
     $('vehicles').replaceChildren(fragment);
@@ -136,7 +139,7 @@
     else $('last-sync').removeAttribute('datetime');
   }
 
-  function showGarage(garage, justRefreshed = false) {
+  function showGarage(garage) {
     if (!garage || typeof garage !== 'object' || !Array.isArray(garage.vehicles)) throw new Error('invalid');
     const ordinals = new Set();
     const entries = garage.vehicles.slice(0, 20).map((item) => {
@@ -155,10 +158,9 @@
     renderVehicles();
     renderVehicleSelects();
     if (garage.vehicles.length > 20) notice('GARAGE DISPLAY LIMIT', `Showing the first 20 of ${garage.vehicles.length} vehicles. Counts and controls apply to these 20 vehicles only.`);
-    else if (state.mode === 'demo') notice('SYNTHETIC READINGS', justRefreshed ? 'Demo garage refreshed. These are synthetic readings, not a connection to real vehicles.' : 'This demo uses synthetic data. Refresh and capture remain manual.');
-    else if (!garage.vehicles.length) notice('READY WHEN YOU ARE', 'Your live garage is empty. Click Refresh garage to request vehicle readings. Opening this page only loads the local cache.');
+    else if (!garage.vehicles.length) notice('READY WHEN YOU ARE', 'No cached vehicles. Click Refresh garage to request readings. Opening this page only loads the local cache.');
     else if (garage.warning || garage.vehicles.some((vehicle) => !vehicle || vehicle.error === 'unavailable')) notice('PARTIAL GARAGE', 'Some readings are unavailable. Sleeping or unreachable vehicles are never woken. You can try a manual refresh later.');
-    else notice(justRefreshed ? 'MANUAL SYNC COMPLETE' : 'CACHED GARAGE', justRefreshed ? 'Garage readings updated. Nothing refreshes again until you ask.' : 'Showing the last cached garage readings, not a live feed. Click Refresh garage for a manual update.');
+    else $('garage-status').hidden = true;
   }
 
   function setBusy(value, operation) {
@@ -193,7 +195,7 @@
     if (state.busy || !state.csrf) return;
     setBusy(true, 'refresh');
     notice('MANUAL SYNC', 'Requesting garage readings. Sleeping vehicles will not be woken.');
-    try { showGarage(await request('/api/refresh', {}), true); }
+    try { showGarage(await request('/api/refresh', {})); }
     catch (error) { notice('SYNC NOT COMPLETED', error.message === 'invalid' ? 'The local server returned an unexpected garage response. Existing readings have not been replaced.' : error.message, true); }
     finally { setBusy(false); }
   });
@@ -205,18 +207,26 @@
     const [current, target, capacity, power, efficiency, price] = plannerIds.map(readInput);
     const errors = [];
     const check = (condition, id, message) => { if (!condition) { errors.push(message); $(id).setAttribute('aria-invalid', 'true'); } };
-    check(current !== null && current >= 0 && current <= 100, 'current-percent', 'Current charge must be between 0 and 100%.');
-    check(target !== null && target >= 0 && target <= 100, 'target-percent', 'Target charge must be between 0 and 100%.');
+    for (const [id, value, min, max, message] of [
+      ['current-percent', current, 0, 100, 'Current charge must be between 0 and 100%.'],
+      ['target-percent', target, 0, 100, 'Target charge must be between 0 and 100%.'],
+      ['capacity', capacity, 0.1, 1000, 'Usable capacity must be 0.1 to 1,000 kWh.'],
+      ['power', power, 0.01, 1000, 'Grid input power must be 0.01 to 1,000 kW.'],
+      ['efficiency', efficiency, 1, 100, 'Efficiency must be 1 to 100%.']
+    ]) {
+      // An unfinished field is not an error. Validate only entered values.
+      if ($(id).value.trim() !== '') check(value !== null && value >= min && value <= max, id, message);
+    }
     if (current !== null && target !== null) check(target >= current, 'target-percent', 'Target charge must be at least current charge.');
-    check(capacity !== null && capacity >= 0.1 && capacity <= 1000, 'capacity', 'Assumed usable capacity must be 0.1 to 1,000 kWh.');
-    check(power !== null && power >= 0.01 && power <= 1000, 'power', 'Assumed grid input power must be 0.01 to 1,000 kW.');
-    check(efficiency !== null && efficiency >= 1 && efficiency <= 100, 'efficiency', 'Efficiency must be 1 to 100%.');
     check($('price').value.trim() === '' || (price !== null && price >= 0 && price <= 1000), 'price', 'Price must be blank or between 0 and 1,000 per kWh.');
     $('planner-error').hidden = errors.length === 0;
     $('planner-error').textContent = errors.join(' ');
-    if (errors.length) {
-      ['result-time', 'result-battery', 'result-grid', 'result-cost'].forEach((id) => { $(id).textContent = missing; });
-      $('result-description').textContent = 'Check your inputs to calculate an estimate.';
+    if (errors.length || [current, target, capacity, power, efficiency].some(value => value === null)) {
+      $('result-time').textContent = errors.length ? 'Check inputs' : 'Enter charging assumptions';
+      $('result-battery').textContent = 'Not calculated';
+      $('result-grid').textContent = 'Not calculated';
+      $('result-cost').textContent = price === null ? 'Add a price for cost' : 'Not calculated';
+      $('result-description').textContent = errors.length ? 'Correct the highlighted inputs.' : 'Complete the required inputs to calculate an estimate.';
       return;
     }
     const battery = capacity * (target - current) / 100;
@@ -225,7 +235,7 @@
     $('result-time').textContent = duration(hours);
     $('result-battery').textContent = `${format(battery, 2)} kWh`;
     $('result-grid').textContent = `${format(grid, 2)} kWh`;
-    $('result-cost').textContent = price === null ? 'No price entered' : `${format(grid * price, 2)} price units`;
+    $('result-cost').textContent = price === null ? 'Add a price for cost' : `${format(grid * price, 2)} price units`;
     $('result-description').textContent = current === target ? 'Already at the assumed target. No added charging energy.' : `${format(current)}% → ${format(target)}% · ${format(target - current)} percentage points, using your assumptions.`;
   }
   $('planner-form').addEventListener('submit', (event) => event.preventDefault());
@@ -238,10 +248,10 @@
     const vehicle = safeVehicle(vehicleAt(index));
     if (!vehicle) return;
     const battery = vehicle?.error === 'unavailable' ? null : bounded(vehicle?.battery_percent, 0, 100);
-    if (battery === null) { $('prefill-status').textContent = `Vehicle ${index} battery is not available. Your assumptions have not changed.`; return; }
+    if (battery === null) { $('prefill-status').textContent = `Vehicle ${index} battery is not reported. Your assumptions have not changed.`; return; }
     $('current-percent').value = String(battery);
     const timestamp = dateText(vehicle.fetched_at);
-    $('prefill-status').textContent = `${state.mode === 'demo' ? 'Synthetic demo battery' : 'Cached battery'} from Vehicle ${index}${timestamp ? `, fetched ${timestamp}` : ', freshness not available'}. Capacity, power and efficiency remain assumptions.`;
+    $('prefill-status').textContent = `${state.mode === 'demo' ? 'Synthetic demo battery' : 'Cached battery'} from Vehicle ${index}${timestamp ? `, fetched ${timestamp}` : ', fetched time not reported'}. Capacity, power and efficiency remain assumptions.`;
     calculate();
   });
 
@@ -251,7 +261,7 @@
     const comparison = entry?.comparison;
     $('comparison').hidden = !comparison;
     $('snapshot-status').classList.remove('is-error');
-    $('snapshot-status').textContent = entry ? `${state.mode === 'demo' ? 'Synthetic demo snapshot. ' : ''}Captured locally · ${entry.completedAt}. ${entry.readingAt ? `Server reading timestamp · ${entry.readingAt}. ` : ''}${comparison ? 'Comparing the latest two captures for this vehicle.' : 'Capture again later to compare.'}` : state.entries.length ? 'No snapshots captured in this session. Capture again later to compare.' : 'No vehicles are available. Refresh the garage before capturing a snapshot.';
+    $('snapshot-status').textContent = entry ? `${state.mode === 'demo' ? 'Synthetic demo snapshot. ' : ''}Captured locally · ${entry.completedAt}. ${comparison ? 'Comparing the latest two captures for this vehicle.' : 'Capture again later to compare.'}` : state.entries.length ? 'No snapshots captured in this session. Capture again later to compare.' : 'No vehicles are available. Refresh the garage before capturing a snapshot.';
     if (!comparison) return;
     $('comparison-vehicle').textContent = `Vehicle ${index}`;
     $('compare-elapsed').textContent = duration(bounded(comparison.elapsed_hours, 0, Number.MAX_SAFE_INTEGER / 60));
@@ -261,8 +271,7 @@
     const current = bounded(comparison.charger_power_kw, 0, 10000);
     $('compare-power').textContent = `Reported charger power: ${previous === null ? missing : `${format(previous)} kW`} → ${current === null ? missing : `${format(current)} kW`}. Change: ${signed(bounded(comparison.charger_power_change_kw, -10000, 10000), 'kW')}.`;
     $('compare-state').textContent = `Latest charging state: ${chargingLabel(comparison.charging_state) ?? missing}.`;
-    const caveat = typeof comparison.caveat === 'string' ? comparison.caveat.trim() : '';
-    $('compare-caveat').textContent = `A difference between two readings is not a measurement of battery drain or battery health. Driving, charging, temperature, rounding and range estimation can affect these values.${caveat ? ` ${caveat}` : ''}`;
+    $('compare-caveat').textContent = 'Changes between snapshots are not a measurement of battery drain or battery health.';
   }
   $('snapshot-vehicle').addEventListener('change', () => renderComparison(Number($('snapshot-vehicle').value)));
   $('capture-button').addEventListener('click', async () => {
@@ -276,8 +285,7 @@
     try {
       const result = await request('/api/capture', { vehicle: index });
       if (!result || typeof result !== 'object' || !result.snapshot || typeof result.snapshot !== 'object' || Array.isArray(result.snapshot) || (result.comparison !== null && (typeof result.comparison !== 'object' || Array.isArray(result.comparison)))) throw new Error('The local server returned an unexpected capture response. No new comparison is shown.');
-      const snapshot = result.snapshot;
-      state.comparisons.set(index, { comparison: result.comparison, completedAt: dateText(new Date().toISOString()), readingAt: dateText(snapshot.captured_at) ?? dateText(snapshot.fetched_at) });
+      state.comparisons.set(index, { comparison: result.comparison, completedAt: dateText(new Date().toISOString()) });
       renderComparison(index);
     } catch (error) {
       $('snapshot-status').classList.add('is-error');
