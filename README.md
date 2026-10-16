@@ -1,11 +1,51 @@
 # zappy
 
-Static GitHub Pages site on `https://zappy-auth.benzhang.dev` that relays OAuth
-browser redirects to the private Zappy app at the fixed origin
-`https://zappy.benzhang.dev`. It exists so the OAuth provider can be given a
-public redirect URI while the app itself stays private.
+A privacy-conscious, read-only Tesla Fleet API toolkit, plus a static GitHub Pages
+OAuth callback host at `https://zappy-auth.benzhang.dev`.
 
-No build step, no dependencies, no published secrets. Plain HTML, one JS file, one CSS file.
+Node.js 22+, standard library only, no dependencies. Real tokens and telemetry stay
+local; public examples use synthetic data. No background polling, wakes, commands,
+location collection, or public telemetry dashboard.
+
+## Quick start
+
+```sh
+npm test
+npm run demo                       # Synthetic, offline, no credentials needed
+npm run login                      # One-time Tesla owner consent in your browser
+npm run zappy -- vehicles           # Ordinal labels and online/asleep status only
+npm run zappy -- status --vehicle 1 # One online-only charging snapshot
+```
+
+The configured client credentials must already exist in `.local/tesla-credentials.json`
+on the setup machine. They are not shipped in this repository. A fresh clone needs
+its own approved Tesla application, private credentials, and registered localhost
+callback before login will work; see the setup sections below.
+
+### Useful experiments implemented
+
+- **Charge check:** a compact battery, charging-limit, power, and range snapshot.
+- **Charging-window planner:** offline energy, time, and cost estimates from your
+  supplied capacity, power, efficiency, and price assumptions.
+- **Local change tracking:** compare two normalized snapshots without publishing
+  a vehicle identity or a raw Tesla response.
+- **Automatic renewal:** refresh nearly expired access tokens and atomically save
+  the rotated refresh token, with a cross-process refresh lock.
+
+```sh
+npm run zappy -- plan --current 40 --target 80 --capacity-kwh 75 --power-kw 7.2
+npm run zappy -- snapshot --vehicle 1
+# Take another snapshot later, then compare without another API call:
+npm run zappy -- compare --vehicle 1
+npm run check                      # Offline tests + publishable-file privacy audit
+```
+
+Vehicle ordinals follow the current API list order, not a permanent identity. Raw
+API records are never normal command output. Real charge status and timing can
+still be sensitive: only `demo` output should be used in public examples.
+
+See [practical recipes and model limitations](docs/recipes.md), and
+[security, local data, and publishing safeguards](SECURITY.md).
 
 ## Setup status (2026-10-15)
 
@@ -20,7 +60,8 @@ No build step, no dependencies, no published secrets. Plain HTML, one JS file, o
 - Optional billing details were skipped. Future Fleet API usage can have charges;
   this setup does not configure a billing payment method or start polling.
 - North America partner registration succeeded and the registered public key was verified.
-- No private web app is deployed yet; the public relay destinations are reserved for it.
+- No private web app is deployed; the public relay destinations are reserved for it.
+  The implemented CLI logs in directly through the registered localhost callback.
 - A localhost owner OAuth login succeeded with read-only vehicle information and
   offline access. A real vehicle-list request and a live charge-state request both
   returned HTTP 200 without configuring a payment method. Test results and tokens
@@ -73,7 +114,7 @@ for token exchange; it must send the public slash URI it used for authorize.
 
 ## Setup
 
-1. Repository: `https://github.com/ben-z/zappy`; local clone: `~/Projects/zappy`.
+1. This deployment uses `https://github.com/ben-z/zappy`; clone into a private local directory.
 2. Settings > Pages: deploy from branch `main`, folder `/ (root)`.
 3. Custom domain: `zappy-auth.benzhang.dev` (matches the committed `CNAME`). Enable "Enforce HTTPS".
 4. Cloudflare DNS: `CNAME zappy-auth -> ben-z.github.io`, **DNS only**.
@@ -109,13 +150,13 @@ https://zappy-auth.benzhang.dev/.well-known/appspecific/com.tesla.3p.public-key.
 ```
 
 The public key is committed. The matching private key was generated on the setup
-Mac at `~/Projects/zappy/.local/fleet.private.pem` with owner-only permissions.
+Mac at `.local/fleet.private.pem` inside the local clone, with owner-only permissions.
 It is git-ignored and is NOT recoverable by cloning this public repo. Back it up in
 a secret manager and securely deploy it to the private app or Tesla Vehicle Command
 Proxy before using vehicle commands. Never upload the private key to Pages.
 
 The app's client credentials are stored only on the setup Mac at
-`~/Projects/zappy/.local/tesla-credentials.json`, with owner-only permissions.
+`.local/tesla-credentials.json` inside the local clone, with owner-only permissions.
 The `.local` directory itself is owner-only and excluded from git. Back these up
 securely; do not copy them into Pages or a future browser frontend.
 
@@ -191,8 +232,10 @@ mock the token fetch, use temp directories and an ephemeral port.
 
 The token file is private and must never be uploaded or pasted into chat. Check its
 `expires_at` field when using the access token. Re-running the login helper obtains
-fresh tokens and atomically replaces that file. The helper does not yet implement
-automatic token refresh; a future private API client should use Tesla's refresh-token
-grant and atomically save the newly returned refresh token, rather than reusing the
-old refresh token. Official flow:
+fresh tokens and atomically replaces that file. The read-only Fleet client now
+refreshes access tokens when they are within a minute of expiry, atomically saving
+the new refresh token. It also permits a single refresh-and-retry after a 401.
+Refreshing does not expand the scopes you granted. Re-login is required if Tesla
+revokes or expires the grant. Avoid running a fresh login while CLI API commands
+are active. Official flow:
 https://developer.tesla.com/docs/fleet-api/authentication/third-party-tokens

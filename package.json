@@ -1,6 +1,15 @@
 {
-  "name": "zappy-auth-redirect",
+  "name": "zappy",
   "private": true,
   "version": "1.0.0",
-  "scripts": { "test": "node --test" }
+  "description": "Privacy-conscious, read-only Tesla Fleet API toolkit and OAuth callback site",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test",
+    "privacy": "node scripts/privacy-audit.cjs",
+    "check": "npm test && npm run privacy",
+    "demo": "node scripts/zappy.cjs demo",
+    "zappy": "node scripts/zappy.cjs",
+    "login": "node scripts/oauth-login.cjs"
+  }
 }
