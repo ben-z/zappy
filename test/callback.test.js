@@ -49,9 +49,12 @@ test('signout forwards only state,error', () => {
   assert.strictEqual(u.origin + u.pathname, 'https://zappy.benzhang.dev/oauth-signout-redirect');
   assert.deepStrictEqual([...u.searchParams.keys()].sort(), ['error', 'state']);
 });
-test('signout without params does not forward', () => {
-  assert.strictEqual(computeRedirect('signout', '?code=c').action, 'none');
-  assert.strictEqual(computeRedirect('signout', '').action, 'none');
+test('parameterless signout returns to the fixed private route', () => {
+  for (const search of ['', '?code=c', '?next=https://evil.example']) {
+    assert.deepStrictEqual(computeRedirect('signout', search), {
+      action: 'forward', url: 'https://zappy.benzhang.dev/oauth-signout-redirect'
+    });
+  }
 });
 test('unknown flow rejected', () => {
   assert.strictEqual(computeRedirect('__proto__', '?code=a&state=b').action, 'reject');
@@ -115,4 +118,29 @@ test('static files and hardening', () => {
   assert.match(js, /location\.replace/);
   assert.doesNotMatch(js, /console\./);
   assert.doesNotMatch(js, /location\.(href|assign)\s*=/);
+});
+
+
+test('Tesla public key is a valid P-256 EC public key', () => {
+  const crypto = require('node:crypto');
+  const pem = read('.well-known/appspecific/com.tesla.3p.public-key.pem');
+  const key = crypto.createPublicKey(pem);
+  assert.strictEqual(key.asymmetricKeyType, 'ec');
+  assert.strictEqual(key.asymmetricKeyDetails.namedCurve, 'prime256v1');
+  assert.match(pem, /^-----BEGIN PUBLIC KEY-----/);
+});
+
+test('publishable tree contains no private key material', () => {
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (['.git', '.local', 'node_modules'].includes(entry.name)) continue;
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(file);
+      else if (entry.isFile()) {
+        const text = fs.readFileSync(file, 'utf8');
+        assert.doesNotMatch(text, /-----BEGIN\s+(?:RSA\s+|EC\s+|ENCRYPTED\s+)?PRIVATE KEY-----/, file);
+      }
+    }
+  }
+  walk(root);
 });

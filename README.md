@@ -20,8 +20,8 @@ All other query parameters are dropped.
 ### Trailing slash: IMPORTANT
 
 GitHub Pages serves `oauth-signin-redirect/index.html`, so the canonical public URL
-has a **trailing slash**. Without it, Pages answers with a 301 redirect that can
-drop or alter behavior. The private app routes are the opposite: **no** trailing slash.
+has a **trailing slash**. Register that form to avoid an extra redirect at the callback.
+The private app routes are the opposite: **no** trailing slash.
 
 The public URI with the trailing slash must be used **identically** in both:
 
@@ -42,8 +42,9 @@ for token exchange; it must send the public slash URI it used for authorize.
 ## Behavior
 
 - Signin forwards only when `code` and `state` are both present, or `error` is present.
-- Signout forwards only when `state` or `error` is present.
-- Otherwise the page stays and shows a generic status message (no redirect).
+- Signout returns to the fixed private route even without parameters, since providers
+  may send a parameterless post-logout callback. Only `state` and `error` are forwarded.
+- Signin without expected parameters stays and shows a generic status message (no redirect).
 - If a whitelisted parameter appears more than once, the request is rejected: no redirect.
 - Before leaving, the query string is removed from the public page's history entry
   (`history.replaceState`), then `location.replace()` is used so the public URL is not
@@ -52,10 +53,11 @@ for token exchange; it must send the public slash URI it used for authorize.
 
 ## Setup
 
-1. Create a GitHub repo and push `main` (not done by this project).
+1. Repository: `https://github.com/ben-z/zappy`; local clone: `~/Projects/zappy`.
 2. Settings > Pages: deploy from branch `main`, folder `/ (root)`.
 3. Custom domain: `zappy-auth.benzhang.dev` (matches the committed `CNAME`). Enable "Enforce HTTPS".
-4. DNS: `CNAME zappy-auth -> <github-user>.github.io`.
+4. Cloudflare DNS: `CNAME zappy-auth -> ben-z.github.io`, **DNS only**.
+   Leave `*.benzhang.dev` pointing to the private Tailscale ingress.
 5. `.nojekyll` is committed so Pages serves files as-is.
 6. Register the two public URIs (with trailing slashes) with the OAuth provider.
 
@@ -74,19 +76,38 @@ for token exchange; it must send the public slash URI it used for authorize.
 - `<meta name="referrer" content="no-referrer">` on every page.
 - CSP meta: `default-src 'none'; script-src 'self'; style-src 'self'`; no inline scripts, no third-party resources.
 - `location.replace` is used, never `href=` / `assign`.
-- No client secrets or private keys belong in this repo. `.gitignore` excludes `.local/`, `*.pem` (except `*.public.pem`), `.env*`, `*.key`.
+- No client secrets or private keys belong in this repo. `.gitignore` excludes `.local/`,
+  `*.pem` except explicitly allowed public keys, `.env*`, and `*.key`.
 - Limitations: meta CSP cannot set `frame-ancestors`, and GitHub Pages cannot set custom headers. Query values pass through the browser URL bar and provider logs by nature of OAuth redirects. Use PKCE and one-time `state`.
 
-## Future: public key requirements
+## Tesla Fleet API public key and partner registration
 
-Not present yet; no placeholder key is committed. If the provider later needs a
-public key or JWKS (e.g. `private_key_jwt` client auth, signed requests):
+Tesla requires a PEM-encoded P-256 (`prime256v1` / `secp256r1`) public key at:
 
-- Generate the key pair outside this repo (keep the private half in `.local/` or a secret manager; never commit it).
-- Commit only the public half, e.g. `.well-known/jwks.json` or `keys/<kid>.public.pem`. Pages must serve it; `.nojekyll` already allows dot-directories.
-- Include a stable `kid`, algorithm (e.g. RS256/ES256), and `use: sig`.
-- Support rotation by publishing old and new keys together until old tokens expire.
-- Add a test asserting no `PRIVATE KEY` material appears in the tree.
+```
+https://zappy-auth.benzhang.dev/.well-known/appspecific/com.tesla.3p.public-key.pem
+```
+
+The public key is committed. The matching private key was generated on the setup
+Mac at `~/Projects/zappy/.local/fleet.private.pem` with owner-only permissions.
+It is git-ignored and is NOT recoverable by cloning this public repo. Back it up in
+a secret manager and securely deploy it to the private app or Tesla Vehicle Command
+Proxy before using vehicle commands. Never upload the private key to Pages.
+
+After Tesla issues the app's client credentials, obtain a partner token and register
+the application in the appropriate region with `domain: zappy-auth.benzhang.dev`.
+The registration domain must share the root domain of the allowed origin. Official
+references:
+
+- https://developer.tesla.com/docs/fleet-api/authentication/partner-tokens
+- https://developer.tesla.com/docs/fleet-api/endpoints/partner-endpoints
+
+For vehicle commands, the owner must also pair the registered public key with the
+vehicle through Tesla's mobile-app flow. Publishing the key alone does not register
+the partner, pair a vehicle, or grant access to any vehicle.
+
+Keep the existing key stable. Do not regenerate/replace it after registration or
+pairing without planning the registration and vehicle re-pairing steps.
 
 ## Tests
 

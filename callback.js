@@ -11,7 +11,8 @@
     signout: {
       destination: PRIVATE_ORIGIN + '/oauth-signout-redirect',
       allowed: ['state', 'error'],
-      expected: function (p) { return p.has('state') || p.has('error'); }
+      // Providers may return from logout with no parameters; this is only a fixed navigation.
+      expected: function () { return true; }
     }
   };
 
@@ -34,7 +35,8 @@
       out.append(k, keys[i][1]);
     }
     if (!cfg.expected(out)) return { action: 'none', reason: 'no-expected-params' };
-    return { action: 'forward', url: cfg.destination + '?' + out.toString() };
+    var query = out.toString();
+    return { action: 'forward', url: cfg.destination + (query ? '?' + query : '') };
   }
 
   var MESSAGES = {
