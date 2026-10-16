@@ -189,3 +189,12 @@ test('human demo output is structured and rounded while JSON retains precision',
   const machine = await invoke(['demo', '--json']);
   assert.equal(machine.parsed.status.estimated_range_km, 150 * 1.609344);
 });
+
+
+test('known authorization failures provide fixed recovery guidance without private details', async () => {
+  const client = { async listVehicles() { const e = new Error(SECRET); e.name = 'FleetError'; e.code = 'TOKEN_REFRESH_POISONED'; throw e; } };
+  const result = await invoke(['vehicles'], { client });
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /SECURITY\.md/);
+  assertPrivateFree(result);
+});

@@ -4,11 +4,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 const DEFAULT_ROOT = path.resolve(__dirname, '..');
-const PRIVATE_FIELDS = new Set(['client_id', 'client_secret', 'access_token', 'refresh_token', 'id_token', 'vin', 'display_name', 'vehicle_name', 'email', 'account_id', 'id_s']);
+const PRIVATE_FIELDS = new Set(['client_id', 'client_secret', 'access_token', 'refresh_token', 'id_token', 'vin', 'display_name', 'vehicle_name', 'email', 'account_id', 'user_id', 'vehicle_id', 'id', 'id_s']);
 function privateValues(root) {
   const values = new Set();
   function visit(value, key) {
-    if (PRIVATE_FIELDS.has(key) && typeof value === 'string' && value.length >= 3) values.add(value);
+    if (PRIVATE_FIELDS.has(key)) {
+      if (typeof value === 'string' && value.length >= 3) values.add(value);
+      else if (typeof value === 'number' && Number.isFinite(value)) values.add(String(value));
+    }
     if (Array.isArray(value)) value.forEach(v => visit(v, ''));
     else if (value && typeof value === 'object') for (const [k, v] of Object.entries(value)) visit(v, k);
   }

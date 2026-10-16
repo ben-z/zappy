@@ -196,6 +196,7 @@ function createSession(opts = {}) {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
       body: body.toString(),
       signal: AbortSignal.timeout(30000),
+      redirect: 'error',
     });
     if (!r.ok) throw new Error(`token exchange failed (HTTP ${r.status})`);
     return buildTokenRecord(await r.json(), now());

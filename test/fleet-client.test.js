@@ -117,7 +117,7 @@ test('missing refresh replacement, malformed tokens and failed exchanges preserv
     const before = await fs.readFile(f.tokenFile, 'utf8');
     await assert.rejects(f.client(async () => reply).listVehicles(), FleetError);
     assert.equal(await fs.readFile(f.tokenFile, 'utf8'), before);
-    assert.equal((await fs.readdir(f.local)).length, 2);
+    assert.equal((await fs.readdir(f.local)).length, reply.status === 400 ? 2 : 3);
   }
 });
 
@@ -265,7 +265,7 @@ test('missing client ID and provider failures do not alter tokens or expose deta
   assert.equal(await fs.readFile(f.tokenFile, 'utf8'), before);
   await fs.writeFile(path.join(f.local, 'tesla-credentials.json'), '{"client_id":"dummy"}');
   await safeReject(f.client(async () => response({ error: 'provider-sensitive 5YJ3E1EA7KF000001' }, 403)).listVehicles(), 'TOKEN_REFRESH_FAILED', 403);
-  await safeReject(f.client(async () => response({ access_token: 'new-access-private', expires_in: 3600 })).listVehicles(), 'INVALID_TOKEN_RESPONSE', 200);
+  await safeReject(f.client(async () => response({ access_token: 'new-access-private', expires_in: 3600 })).listVehicles(), 'TOKEN_REFRESH_POISONED', 200);
   assert.equal(await fs.readFile(f.tokenFile, 'utf8'), before);
 });
 
@@ -286,7 +286,127 @@ test('failed atomic save leaves the original record intact', async t => {
     await fs.mkdir(f.tokenFile);
     return response(rotated());
   });
-  await safeReject(client.listVehicles(), 'TOKEN_SAVE_FAILED');
+  await safeReject(client.listVehicles(), 'TOKEN_REFRESH_POISONED');
   assert.equal(await fs.readFile(path.join(f.local, 'old-record'), 'utf8'), before);
-  assert.deepEqual((await fs.readdir(f.local)).sort(), ['oauth-tokens.json', 'old-record', 'tesla-credentials.json']);
+  assert.deepEqual((await fs.readdir(f.local)).sort(), ['.fleet-refresh.lock', 'oauth-tokens.json', 'old-record', 'tesla-credentials.json']);
+});
+
+test('uncertain exchanges poison the lock and never resubmit the old refresh token', async t => {
+  for (const scenario of ['failed-save', 'malformed-success', 'missing-rotation', 'timeout', 'network-error', 'server-error', 'invalid-json', 'body-timeout', 'http-timeout']) {
+    await t.test(scenario, async t => {
+      const f = await fixture(t, { expires_at: 1 });
+      const before = await fs.readFile(f.tokenFile, 'utf8');
+      let exchanges = 0;
+      const fetch = async url => {
+        assert.equal(url, AUTH);
+        exchanges++;
+        if (scenario === 'failed-save') {
+          await fs.rename(f.tokenFile, path.join(f.local, 'old-record'));
+          await fs.mkdir(f.tokenFile);
+          return response(rotated());
+        }
+        if (scenario === 'malformed-success') return response({ ...rotated(), expires_in: -1 });
+        if (scenario === 'missing-rotation') return response({ access_token: 'new-access-private', expires_in: 3600 });
+        if (scenario === 'timeout') return new Promise(() => {});
+        if (scenario === 'network-error') throw new Error('provider-sensitive');
+        if (scenario === 'server-error') return response({ error: 'provider-sensitive' }, 503);
+        if (scenario === 'http-timeout') return response(null, 408);
+        if (scenario === 'invalid-json') return { status: 200, json: async () => { throw new Error('provider-sensitive'); } };
+        return { status: 200, json: () => new Promise(() => {}) };
+      };
+      const a = createFleetClient({ root: f.root, fetch, now: () => NOW, timeoutMs: 25 });
+      const b = createFleetClient({ root: f.root, fetch, now: () => NOW, timeoutMs: 25 });
+      // Two independent clients share an in-flight exchange and see its poison.
+      const outcomes = await Promise.allSettled([a.listVehicles(), b.listVehicles()]);
+      for (const outcome of outcomes) {
+        assert.equal(outcome.status, 'rejected');
+        assert.equal(outcome.reason.code, 'TOKEN_REFRESH_POISONED');
+        assert.match(outcome.reason.message, /npm run login/);
+      }
+      if (scenario === 'failed-save') {
+        await fs.rmdir(f.tokenFile);
+        await fs.rename(path.join(f.local, 'old-record'), f.tokenFile);
+      }
+      assert.equal(await fs.readFile(f.tokenFile, 'utf8'), before);
+      for (const client of [a, b]) await safeReject(client.listVehicles(), 'TOKEN_REFRESH_POISONED');
+      assert.equal(exchanges, 1);
+      const lock = path.join(f.local, '.fleet-refresh.lock');
+      assert.equal((await fs.stat(lock)).mode & 0o777, 0o700);
+      assert.deepEqual((await fs.readdir(lock)).sort(), ['exchange-started', 'poisoned']);
+      for (const name of ['exchange-started', 'poisoned']) assert.equal((await fs.stat(path.join(lock, name))).mode & 0o777, 0o600);
+    });
+  }
+});
+
+test('definitive refresh 4xx rejection releases lock for a later retry', async t => {
+  for (const status of [400, 401, 403, 429]) {
+    const f = await fixture(t, { expires_at: 1 });
+    let exchanges = 0;
+    const fetch = async url => {
+      if (url === AUTH) { exchanges++; return exchanges === 1 ? response(null, status) : response(rotated()); }
+      return response({ response: [] });
+    };
+    await safeReject(f.client(fetch).listVehicles(), 'TOKEN_REFRESH_FAILED', status);
+    await assert.rejects(fs.stat(path.join(f.local, '.fleet-refresh.lock')), { code: 'ENOENT' });
+    await f.client(fetch).listVehicles();
+    assert.equal(exchanges, 2);
+    await assert.rejects(fs.stat(path.join(f.local, '.fleet-refresh.lock')), { code: 'ENOENT' });
+  }
+});
+
+test('poison permits fresh-token API reads but blocks forced refresh and survives lock deletion in-process', async t => {
+  const f = await fixture(t, { expires_at: 1 });
+  let exchanges = 0;
+  const fetch = async url => {
+    if (url === AUTH) { exchanges++; return response({}); }
+    return response({ response: [] });
+  };
+  await safeReject(f.client(fetch).listVehicles(), 'TOKEN_REFRESH_POISONED');
+  await fs.writeFile(f.tokenFile, JSON.stringify({ ...f.tokens, expires_at: NOW / 1000 + 3600 }));
+  assert.deepEqual(await f.client(fetch).listVehicles(), []);
+  await safeReject(f.client(async url => {
+    assert.notEqual(url, AUTH);
+    return response(null, 401);
+  }).listVehicles(), 'TOKEN_REFRESH_POISONED');
+  // Manual deletion alone cannot authorize this process to exchange again.
+  await fs.rm(path.join(f.local, '.fleet-refresh.lock'), { recursive: true });
+  await fs.writeFile(f.tokenFile, JSON.stringify(f.tokens));
+  await safeReject(f.client(fetch).listVehicles(), 'TOKEN_REFRESH_POISONED');
+  assert.equal(exchanges, 1);
+});
+
+test('waiting independent processes cannot exchange after another process poisons the lock', async t => {
+  const f = await fixture(t, { expires_at: 1 });
+  const moduleFile = require.resolve('../scripts/fleet-client.cjs');
+  const script = `
+    const fs = require('node:fs/promises');
+    const { createFleetClient } = require(process.argv[1]);
+    const root = process.argv[2];
+    const client = createFleetClient({ root, now: () => ${NOW}, lockPollMs: 5, lockWaitMs: 1000,
+      fetch: async (url) => {
+        if (url !== ${JSON.stringify(AUTH)}) throw new Error('unexpected API request');
+        await fs.appendFile(root + '/exchanges', 'exchange\\n');
+        await new Promise(r => setTimeout(r, 60));
+        return { status: 200, json: async () => ({access_token: 'dummy', expires_in: 3600}) };
+      }
+    });
+    client.listVehicles().then(() => { process.exitCode = 1; }, error => {
+      if (error.code !== 'TOKEN_REFRESH_POISONED') process.exitCode = 2;
+    });
+  `;
+  function child() {
+    return new Promise((resolve, reject) => {
+      const p = spawn(process.execPath, ['-e', script, moduleFile, f.root], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = '';
+      p.stdout.on('data', chunk => { output += chunk; });
+      p.stderr.on('data', chunk => { output += chunk; });
+      p.on('error', reject);
+      p.on('exit', code => { try { assert.equal(code, 0); assert.equal(output, ''); resolve(); } catch (error) { reject(error); } });
+    });
+  }
+  await Promise.all([child(), child(), child()]);
+  // Also simulate a fresh process started after the poisoned owner exited.
+  await child();
+  assert.equal(await fs.readFile(path.join(f.root, 'exchanges'), 'utf8'), 'exchange\n');
+  assert.ok((await fs.stat(path.join(f.local, '.fleet-refresh.lock'))).isDirectory());
 });

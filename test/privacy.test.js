@@ -58,3 +58,36 @@ test('does not follow publishable symlinks into private data', t => {
   fs.symlinkSync(path.join(root, '.local', 'private.txt'), path.join(root, 'public.txt'));
   assert.equal(audit({ root, files: ['public.txt'] }).findings[0].rule, 'symlink-not-audited');
 });
+
+
+test('collects numeric account, user, and vehicle identifiers including nested id fields', t => {
+  const root = fixture(t);
+  const identifiers = { account_id: 9876543210, user_id: 8765432109, vehicle_id: 7654321098, id: 6543210987 };
+  fs.writeFileSync(path.join(root, '.local', 'runtime.json'), JSON.stringify({ response: [identifiers] }));
+  for (const [field, identifier] of Object.entries(identifiers)) {
+    const file = field + '.txt';
+    fs.writeFileSync(path.join(root, file), String(identifier));
+    const report = audit({ root, files: [file] });
+    assert.deepEqual(report.findings, [{ file, rule: 'matches-private-local-data' }]);
+    assert.ok(!JSON.stringify(report).includes(String(identifier)));
+  }
+});
+
+
+test('partner helper import performs no credential reads, requests, or output', () => {
+  const { spawnSync } = require('node:child_process');
+  const helper = path.resolve(__dirname, '../scripts/register-partner.cjs');
+  const child = spawnSync(process.execPath, ['-e', `
+    const fs = require('node:fs');
+    const read = fs.readFileSync;
+    fs.readFileSync = function(file, ...args) {
+      if (String(file).includes('.local')) throw new Error('private read attempted');
+      return read.call(this, file, ...args);
+    };
+    globalThis.fetch = () => { throw new Error('network attempted'); };
+    require(${JSON.stringify(helper)});
+  `], { encoding: 'utf8' });
+  assert.equal(child.status, 0);
+  assert.equal(child.stdout, '');
+  assert.equal(child.stderr, '');
+});

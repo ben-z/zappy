@@ -232,7 +232,16 @@ async function run(argv, { client, root = path.resolve(__dirname, '..'), stdout 
     if (['vehicles', 'status', 'snapshot', 'compare', 'demo'].includes(command)) stderr.write(ALIAS_NOTE + '\n');
     return 0;
   } catch (error) {
-    stderr.write((error instanceof SafeError ? error.message : 'Unable to complete request.') + '\n');
+    const guidance = {
+      AUTH_CONFIG: 'Local authorization is missing or invalid. Run npm run login.',
+      TOKEN_REFRESH_FAILED: 'Authorization renewal failed. Run npm run login.',
+      TOKEN_REFRESH_POISONED: 'Authorization renewal is uncertain. Follow the safe lock recovery steps in SECURITY.md; do not simply retry the old token.',
+      TOKEN_REFRESH_LOCKED: 'Authorization renewal is locked. Check SECURITY.md before clearing any lock.',
+      UNAUTHORIZED: 'Tesla rejected authorization. Run npm run login.',
+      REQUEST_TIMEOUT: 'Tesla request timed out. No command or wake request was sent.'
+    };
+    const known = error?.name === 'FleetError' && Object.hasOwn(guidance, error.code) ? guidance[error.code] : null;
+    stderr.write((error instanceof SafeError ? error.message : known || 'Unable to complete request.') + '\n');
     return 1;
   }
 }

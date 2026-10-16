@@ -17,6 +17,8 @@ try {
   oauth = undefined;
 }
 const inFlight = new Map();
+// Poison survives across client instances until this process is restarted.
+const poisoned = new Set();
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 class FleetError extends Error {
@@ -28,6 +30,8 @@ class FleetError extends Error {
   }
 }
 const fail = (code, message, status) => new FleetError(code, message, status);
+const recoveryMessage = 'Authorization refresh is locked or uncertain. Confirm all refreshing clients are stopped, rerun npm run login, then carefully remove the refresh poison markers and lock before restarting clients.';
+const poisonError = status => fail('TOKEN_REFRESH_POISONED', recoveryMessage, status);
 const secretString = value => typeof value === 'string' && value.length > 0 && !/[\r\n]/.test(value);
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -42,6 +46,8 @@ function createFleetClient(options = {}) {
   const tokenFile = path.join(local, 'oauth-tokens.json');
   const credentialFile = path.join(local, 'tesla-credentials.json');
   const lockDir = path.join(local, '.fleet-refresh.lock');
+  const startedFile = path.join(lockDir, 'exchange-started');
+  const poisonFile = path.join(lockDir, 'poisoned');
 
   async function readJSON(file) {
     try {
@@ -126,8 +132,10 @@ function createFleetClient(options = {}) {
 
   async function withLock(work) {
     let owned = false;
+    let uncertain = false;
     const deadline = Date.now() + lockWaitMs;
     try {
+      if (poisoned.has(tokenFile)) throw poisonError();
       await fs.mkdir(local, { recursive: true, mode: 0o700 });
       while (!owned) {
         try {
@@ -136,16 +144,49 @@ function createFleetClient(options = {}) {
           await fs.chmod(lockDir, 0o700);
         } catch (error) {
           if (owned || error.code !== 'EEXIST') throw fail('TOKEN_LOCK_FAILED', 'Unable to secure authorization refresh. Please check local file permissions.');
-          if (Date.now() >= deadline) throw fail('TOKEN_REFRESH_LOCKED', 'Authorization refresh is locked. Verify no other client is refreshing before removing the stale refresh lock.');
+          // An active exchange has only exchange-started. Do not mistake it
+          // for a failed exchange and do not steal its lock, regardless of age.
+          try {
+            await fs.lstat(poisonFile);
+            poisoned.add(tokenFile);
+            throw poisonError();
+          } catch (inspectionError) {
+            if (inspectionError instanceof FleetError) throw inspectionError;
+            if (inspectionError.code !== 'ENOENT') throw fail('TOKEN_LOCK_FAILED', recoveryMessage);
+          }
+          if (Date.now() >= deadline) throw fail('TOKEN_REFRESH_LOCKED', recoveryMessage);
           await wait(Math.min(lockPollMs, Math.max(1, deadline - Date.now())));
         }
       }
-      return await work();
+      return await work({
+        async beginExchange() {
+          // Persist the uncertainty fence BEFORE sending anything. A process
+          // crash must leave a lock that another process will never steal.
+          let handle;
+          try {
+            handle = await fs.open(startedFile, 'wx', 0o600);
+            await handle.writeFile('Refresh exchange started. Manual recovery may be required.\n');
+            await handle.sync();
+          } finally { if (handle) await handle.close(); }
+          uncertain = true;
+        },
+        settled() { uncertain = false; }
+      });
     } catch (error) {
+      if (uncertain) {
+        poisoned.add(tokenFile);
+        // Retaining the directory is the primary fence; even if this marker
+        // cannot be written, waiters time out rather than exchanging again.
+        await fs.writeFile(poisonFile, 'Reauthorization required before removing this lock.\n', { flag: 'wx', mode: 0o600 }).catch(() => {});
+        throw poisonError(error instanceof FleetError ? error.status : undefined);
+      }
       if (error instanceof FleetError) throw error;
       throw fail('TOKEN_LOCK_FAILED', 'Unable to secure authorization refresh. Please check local file permissions.');
     } finally {
-      if (owned) await fs.rmdir(lockDir).catch(() => {});
+      if (owned && !uncertain) {
+        await fs.unlink(startedFile).catch(() => {});
+        await fs.rmdir(lockDir).catch(() => {});
+      }
     }
   }
 
@@ -157,7 +198,7 @@ function createFleetClient(options = {}) {
       const latest = await readJSON(tokenFile);
       if (rejectedAccess === undefined ? fresh(latest) : secretString(latest.access_token) && latest.access_token !== rejectedAccess) return latest;
     }
-    const pending = withLock(async () => {
+    const pending = withLock(async lock => {
       const current = await readJSON(tokenFile);
       // Another process may already have replaced the rejected/expiring token.
       if (rejectedAccess === undefined ? fresh(current) : secretString(current.access_token) && current.access_token !== rejectedAccess) return current;
@@ -167,7 +208,10 @@ function createFleetClient(options = {}) {
       }
       // Public-client refresh: intentionally do not send client_secret.
       const form = new URLSearchParams({ grant_type: 'refresh_token', client_id: credentials.client_id, refresh_token: current.refresh_token, audience: API });
+      await lock.beginExchange();
       const { status, body } = await request(AUTH, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: form.toString() });
+      // A definitive HTTP 4xx rejection did not issue replacement tokens.
+      if (status >= 400 && status < 500 && status !== 408 && status !== 499) lock.settled();
       if (status < 200 || status >= 300 || !record(body) || body.error || body.errors) {
         throw fail('TOKEN_REFRESH_FAILED', 'Tesla authorization refresh failed. Reauthorize before retrying.', status);
       }
@@ -195,6 +239,7 @@ function createFleetClient(options = {}) {
         throw fail('INVALID_TOKEN_RESPONSE', 'Tesla returned incomplete authorization. Reauthorize before retrying.', status);
       }
       await writeAtomic(updated);
+      lock.settled();
       return updated;
     });
     inFlight.set(tokenFile, pending);
