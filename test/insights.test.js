@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { normalizeCharge, planCharging, compareSnapshots } = require('../scripts/insights.cjs');
+const { normalizeCharge, sanitizeSnapshot, planCharging, compareSnapshots } = require('../scripts/insights.cjs');
 const alias = 'vehicle-1';
 const normalize = charge => normalizeCharge(alias, 'online', { charge_state: charge });
 
@@ -80,4 +80,38 @@ test('comparison reports change, not inferred drain or efficiency, and enforces 
   assert.throws(() => compareSnapshots(after, before));
   assert.throws(() => compareSnapshots(before, { ...after, captured_at: 'invalid' }));
   assert.equal(compareSnapshots(before, { ...after, snapshot: normalize({}) }).battery_percentage_point_delta, null);
+});
+
+
+test('normalized snapshot sanitizer preserves exact km and drops extra identities', () => {
+  const snapshot = normalize({ battery_level: 50, usable_battery_level: 49, charge_limit_soc: 80,
+    charging_state: 'Charging', charger_power: 7, battery_range: 150, time_to_full_charge: 2 });
+  const clean = sanitizeSnapshot(alias, { ...snapshot, alias: 'PRIVATE', vin: 'PRIVATE', id: 'PRIVATE',
+    id_s: 'PRIVATE', fingerprint: 'PRIVATE', raw: { latitude: 'PRIVATE' } });
+  assert.deepEqual(clean, snapshot);
+  assert.equal(clean.estimated_range_km, 150 * 1.609344);
+  assert.doesNotMatch(JSON.stringify(clean), /PRIVATE|vin|fingerprint|latitude|id_s/);
+});
+
+test('normalized snapshot sanitizer strictly validates types, enums and inclusive bounds', () => {
+  const bounds = { battery_percent: 100, usable_battery_percent: 100, charge_limit_percent: 100,
+    charger_power_kw: 1000, estimated_range_km: 2000 * 1.609344, time_to_full_charge_hours: 168 };
+  for (const [key, max] of Object.entries(bounds)) {
+    for (const value of [0, max]) assert.equal(sanitizeSnapshot(alias, { charging_state: 'Charging', [key]: value })[key], value);
+    for (const value of [-1, max + 1, '50', true, {}, [], NaN, Infinity, -Infinity, null, undefined]) {
+      assert.equal(sanitizeSnapshot(alias, { charging_state: 'Charging', [key]: value })[key], null, key);
+    }
+  }
+  for (const value of [null, undefined, [], 'PRIVATE', 4]) {
+    assert.deepEqual(sanitizeSnapshot(alias, value), normalizeCharge(alias, null, null));
+  }
+  for (const value of ['PRIVATE', 'offline', {}, [], true, 1]) {
+    const clean = sanitizeSnapshot(alias, { state: value, charging_state: value, time_to_full_charge_hours: 2 });
+    assert.equal(clean.state, null); assert.equal(clean.charging_state, null); assert.equal(clean.time_to_full_charge_hours, null);
+  }
+  for (const state of ['online', 'asleep']) assert.equal(sanitizeSnapshot(alias, { state }).state, state);
+  for (const charging_state of ['Charging', 'Complete', 'Disconnected', 'Stopped', 'NoPower', 'Starting']) {
+    const clean = sanitizeSnapshot(alias, { charging_state, time_to_full_charge_hours: 2 });
+    assert.equal(clean.charging_state, charging_state); assert.equal(clean.time_to_full_charge_hours, charging_state === 'Charging' ? 2 : null);
+  }
 });

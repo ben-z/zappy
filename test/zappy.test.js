@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
-const { run } = require('../scripts/zappy.cjs');
+const { run, captureSnapshot, loadComparison } = require('../scripts/zappy.cjs');
 const SECRET = 'SYNTHETIC-PRIVATE-INJECTION\nforged: true';
 const vehicle = (id = 'synthetic-id-a', state = 'online') => ({ id, vin: `synthetic-vin-${id}`, state, display_name: SECRET, latitude: 42, option_codes: SECRET });
 const data = (battery = 50) => ({ charge_state: { battery_level: battery, usable_battery_level: 49,
@@ -197,4 +197,54 @@ test('known authorization failures provide fixed recovery guidance without priva
   assert.equal(result.code, 1);
   assert.match(result.stderr, /SECURITY\.md/);
   assertPrivateFree(result);
+});
+
+
+test('object snapshot operation uses only list plus online charge and comparison stays local', async t => {
+  for (const state of ['online', 'asleep', 'offline', SECRET]) {
+    const root = await temporary(t);
+    const client = fixture([vehicle('synthetic-a', state)]);
+    const snapshot = await captureSnapshot({ root, client, ordinal: 1, now: () => 0 });
+    assert.equal(snapshot.alias, 'vehicle-1'); assert.equal(snapshot.battery_percent, state === 'online' ? 50 : null);
+    assert.equal(client.calls.length, state === 'online' ? 2 : 1);
+    await assert.rejects(loadComparison({ root, ordinal: 1 }), /Two valid private snapshots/);
+    await captureSnapshot({ root, client, ordinal: 1, now: () => 3600000 });
+    const before = client.calls.length;
+    const comparison = await loadComparison({ root, ordinal: 1 });
+    assert.equal(comparison.elapsed_hours, 1); assert.equal(client.calls.length, before);
+  }
+});
+
+test('object operations reject invalid ordinals before calls and preserve Fleet errors unchanged', async t => {
+  const root = await temporary(t); const client = fixture();
+  for (const ordinal of [undefined, null, '1', 0, -1, 1.5, 100001, Infinity]) {
+    await assert.rejects(captureSnapshot({ root, client, ordinal }));
+    await assert.rejects(loadComparison({ root, ordinal }));
+  }
+  assert.deepEqual(client.calls, []); assert.deepEqual(await fs.readdir(root), []);
+  for (const method of ['listVehicles', 'getVehicleData']) {
+    const error = Object.assign(new Error(SECRET), { name: 'FleetError', code: 'UNAUTHORIZED' });
+    const client = fixture(); client[method] = async () => { throw error; };
+    await assert.rejects(captureSnapshot({ root, client, ordinal: 1 }), cause => cause === error);
+  }
+  assert.deepEqual(await fs.readdir(root), []);
+});
+
+test('private decode revalidates normalized fields, drops IDs, and preserves km precision', async t => {
+  const root = await temporary(t);
+  await captureSnapshot({ root, client: fixture(), ordinal: 1, now: () => 0 });
+  const file = path.join(root, '.local/snapshots/vehicle-1.json');
+  const record = JSON.parse(await fs.readFile(file, 'utf8'));
+  const range = 150 * 1.609344;
+  Object.assign(record.snapshot, { battery_percent: '50', usable_battery_percent: -1, charge_limit_percent: 101,
+    charging_state: SECRET, state: SECRET, charger_power_kw: 1001, time_to_full_charge_hours: 169,
+    estimated_range_km: range, vin: SECRET, id: SECRET, id_s: SECRET, raw: { private: SECRET } });
+  await fs.writeFile(file, JSON.stringify(record));
+  await captureSnapshot({ root, client: fixture(), ordinal: 1, now: () => 3600000 });
+  const previous = JSON.parse(await fs.readFile(path.join(root, '.local/snapshots/vehicle-1.previous.json'), 'utf8'));
+  assert.equal(previous.snapshot.estimated_range_km, range);
+  for (const key of ['state', 'battery_percent', 'usable_battery_percent', 'charge_limit_percent', 'charging_state', 'charger_power_kw', 'time_to_full_charge_hours']) assert.equal(previous.snapshot[key], null);
+  assert.doesNotMatch(JSON.stringify(previous), /SYNTHETIC-PRIVATE|"vin"|"id"|"id_s"|"raw"/);
+  const comparison = await loadComparison({ root, ordinal: 1 });
+  assert.equal(comparison.battery_percentage_point_delta, null); assert.equal(comparison.estimated_range_change_km, 0);
 });

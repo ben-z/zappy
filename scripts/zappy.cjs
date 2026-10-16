@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const { constants } = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { normalizeCharge, planCharging, compareSnapshots, state, number } = require('./insights.cjs');
+const { normalizeCharge, planCharging, compareSnapshots, state, sanitizeSnapshot } = require('./insights.cjs');
 
 const ALIAS_NOTE = 'Aliases are ordinal list positions, not persistent vehicle identities.';
 const HELP = `Usage: zappy demo|vehicles [--json]
@@ -142,14 +142,8 @@ function decodeRecord(text, alias) {
   if (!value || value.version !== 1 || !/^[a-f0-9]{64}$/.test(value.fingerprint) ||
       typeof value.captured_at !== 'string' || !Number.isFinite(Date.parse(value.captured_at)) ||
       !value.snapshot || value.snapshot.alias !== alias) throw new Error();
-  const s = value.snapshot;
-  const clean = normalizeCharge(alias, s.state, { charge_state: {
-    battery_level: s.battery_percent, usable_battery_level: s.usable_battery_percent,
-    charge_limit_soc: s.charge_limit_percent, charging_state: s.charging_state,
-    charger_power: s.charger_power_kw, time_to_full_charge: s.time_to_full_charge_hours
-  } });
-  clean.estimated_range_km = number(s.estimated_range_km, 0, 2000 * 1.609344);
-  return { version: 1, fingerprint: value.fingerprint, captured_at: value.captured_at, snapshot: clean };
+  return { version: 1, fingerprint: value.fingerprint, captured_at: value.captured_at,
+    snapshot: sanitizeSnapshot(alias, value.snapshot) };
 }
 async function saveSnapshot(root, alias, vehicle, snapshot, now) {
   try {
@@ -167,7 +161,9 @@ async function saveSnapshot(root, alias, vehicle, snapshot, now) {
     fail('Unable to save private snapshot safely.');
   }
 }
-async function loadComparison(root, alias) {
+async function loadComparison({ root = path.resolve(__dirname, '..'), ordinal } = {}) {
+  if (!Number.isInteger(ordinal) || ordinal < 1 || ordinal > 100000) fail('Provide --vehicle with a positive ordinal number.');
+  const alias = `vehicle-${ordinal}`;
   try {
     const { dir } = await privatePaths(root, false);
     const current = decodeRecord(await readPrivate(path.join(dir, `${alias}.json`)), alias);
@@ -178,6 +174,19 @@ async function loadComparison(root, alias) {
     if (error instanceof SafeError) throw error;
     fail('Two valid private snapshots for this vehicle are required to compare.');
   }
+}
+async function captureSnapshot({ root = path.resolve(__dirname, '..'), client, ordinal, now = Date.now } = {}) {
+  if (!Number.isInteger(ordinal) || ordinal < 1 || ordinal > 100000) fail('Provide --vehicle with a positive ordinal number.');
+  const fleet = client || require('./fleet-client.cjs').createFleetClient({ root, fetch: globalThis.fetch, now });
+  const vehicles = await fleet.listVehicles();
+  if (!Array.isArray(vehicles) || vehicles.length > 100000) fail('Unable to read vehicle list.');
+  const vehicle = vehicles[ordinal - 1];
+  if (!vehicle || typeof vehicle !== 'object' || Array.isArray(vehicle)) fail('Vehicle ordinal not found.');
+  const alias = `vehicle-${ordinal}`;
+  const data = vehicle.state === 'online' ? await fleet.getVehicleData(vehicle) : null;
+  const snapshot = normalizeCharge(alias, vehicle.state, data);
+  await saveSnapshot(root, alias, vehicle, snapshot, now);
+  return snapshot;
 }
 function demo() {
   const snapshot = normalizeCharge('vehicle-1', 'online', { charge_state: {
@@ -212,7 +221,8 @@ async function run(argv, { client, root = path.resolve(__dirname, '..'), stdout 
     let result;
     if (command === 'demo') result = demo();
     else if (command === 'plan') result = chargingPlan(flags);
-    else if (command === 'compare') result = await loadComparison(root, `vehicle-${flags.vehicle}`);
+    else if (command === 'compare') result = await loadComparison({ root, ordinal: Number(flags.vehicle) });
+    else if (command === 'snapshot') result = await captureSnapshot({ root, client, ordinal: Number(flags.vehicle), now });
     else {
       // The core is loaded only for actual Fleet reads, never on import or offline commands.
       const fleet = client || require('./fleet-client.cjs').createFleetClient({ root, fetch: globalThis.fetch, now });
@@ -225,7 +235,6 @@ async function run(argv, { client, root = path.resolve(__dirname, '..'), stdout 
         const alias = `vehicle-${flags.vehicle}`;
         const data = vehicle.state === 'online' ? await fleet.getVehicleData(vehicle) : null;
         result = normalizeCharge(alias, vehicle.state, data);
-        if (command === 'snapshot') await saveSnapshot(root, alias, vehicle, result, now);
       }
     }
     stdout.write(render(result, flags.json));
@@ -245,5 +254,5 @@ async function run(argv, { client, root = path.resolve(__dirname, '..'), stdout 
     return 1;
   }
 }
-module.exports = { run };
+module.exports = { run, captureSnapshot, loadComparison };
 if (require.main === module) run(process.argv.slice(2)).then(code => { process.exitCode = code; });

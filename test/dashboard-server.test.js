@@ -121,7 +121,7 @@ test('concurrent refreshes dedupe, capture cannot overlap, cooldown is mockable'
   assert.equal((await f.post('/api/refresh')).status, 200); assert.equal(lists, 2);
 });
 test('demo refresh/capture remains synthetic without any client or private filesystem use', async t => {
-  const f = await fixture(t, { mode: 'demo', cooldownMs: 0, client: new Proxy({}, { get() { throw Error('No Fleet access'); } }), run() { throw Error('No private disk access'); } });
+  const f = await fixture(t, { mode: 'demo', cooldownMs: 0, client: new Proxy({}, { get() { throw Error('No Fleet access'); } }), captureSnapshot() { throw Error('No private disk access'); }, loadComparison() { throw Error('No private disk access'); } });
   assert.equal(f.bootstrap.mode, 'demo'); assert.equal(f.bootstrap.garage.vehicles.length, 2);
   const [a, b] = f.bootstrap.garage.vehicles; assert.equal(a.battery_percent, 72); assert.equal(a.charger_power_kw, 7.2); assert.equal(a.estimated_range_km, 312.4); assert.equal(b.battery_percent, 48); assert.equal(b.charging_state, 'Disconnected');
   assert.equal((await f.post('/api/refresh')).json.request_count, 0);
@@ -130,16 +130,53 @@ test('demo refresh/capture remains synthetic without any client or private files
   assert.equal((await f.post('/api/capture', { vehicle: 3 })).status, 404);
   await assert.rejects(fs.stat(path.join(f.root, '.local')), { code: 'ENOENT' });
 });
-test('capture uses counted narrow client and re-normalizes CLI JSON without provider fields', async t => {
-  const commands = [];
-  const f = await fixture(t, { client: { async listVehicles() { return [{ state: 'online' }]; }, async getVehicleData() { return {}; } }, run: async (args, options) => {
-    commands.push(args);
-    if (args[0] === 'snapshot') { const vehicles = await options.client.listVehicles(); await options.client.getVehicleData(vehicles[0]); options.stdout.write(JSON.stringify({ alias: 'PRIVATE', state: 'online', battery_percent: 50, vin: 'PRIVATE', charging_state: 'evil', estimated_range_km: 200 })); }
-    else options.stdout.write(JSON.stringify({ alias: 'PRIVATE', battery_percentage_point_delta: 2, caveat: 'PRIVATE', raw: 'PRIVATE' }));
-    return 0;
+test('capture uses direct operations and revalidates normalized objects without provider fields', async t => {
+  const calls = [];
+  const preciseRange = 150 * 1.609344;
+  const f = await fixture(t, { client: { async listVehicles() { return [{ state: 'online' }]; }, async getVehicleData() { return {}; } },
+    captureSnapshot: async options => {
+      assert.equal(options.root, f.root); assert.equal(options.ordinal, 1); assert.equal(options.now(), stamp);
+      calls.push('snapshot');
+      const vehicles = await options.client.listVehicles(); await options.client.getVehicleData(vehicles[0]);
+      return { alias: 'PRIVATE', state: 'online', battery_percent: '50', usable_battery_percent: -1,
+        charge_limit_percent: 101, vin: 'PRIVATE', id: 'PRIVATE', id_s: 'PRIVATE', charging_state: 'evil',
+        charger_power_kw: 1001, estimated_range_km: preciseRange, time_to_full_charge_hours: 2 };
+    },
+    loadComparison: async options => {
+      assert.deepEqual(options, { root: f.root, ordinal: 1 }); calls.push('compare');
+      return { alias: 'PRIVATE', battery_percentage_point_delta: 2, caveat: 'PRIVATE', raw: 'PRIVATE' };
+    }
+  });
+  const response = await f.post('/api/capture', { vehicle: 1 }); assert.equal(response.status, 200);
+  assert.deepEqual(response.json.snapshot, { alias: 'vehicle-1', state: 'online', battery_percent: null,
+    usable_battery_percent: null, charge_limit_percent: null, charging_state: null, charger_power_kw: null,
+    estimated_range_km: preciseRange, time_to_full_charge_hours: null });
+  assert.equal(response.json.comparison.battery_percentage_point_delta, 2); assert.doesNotMatch(response.text, /PRIVATE|"vin"|"raw"|"id"|"id_s"/);
+  assert.deepEqual(calls, ['snapshot', 'compare']); assert.equal((await f.get('/api/garage')).json.request_count, 2);
+});
+test('direct capture rejects non-objects and safely omits unavailable local comparisons', async t => {
+  for (const snapshot of [null, [], 'private-snapshot']) {
+    let comparisons = 0;
+    const f = await fixture(t, { client: {}, captureSnapshot: async () => snapshot, loadComparison: async () => { comparisons++; } });
+    const response = await f.post('/api/capture', { vehicle: 1 });
+    assert.equal(response.status, 502); assert.deepEqual(response.json, { error: 'UNAVAILABLE' }); assert.equal(comparisons, 0);
+  }
+  const f = await fixture(t, { client: {}, captureSnapshot: async () => ({ state: 'asleep' }), loadComparison: async () => { throw Error('PRIVATE history'); } });
+  const response = await f.post('/api/capture', { vehicle: 1 }); assert.equal(response.status, 200); assert.equal(response.json.comparison, null); assert.doesNotMatch(response.text, /PRIVATE/);
+});
+test('real capture operations preserve request counts, first comparison, and reorder refusal', async t => {
+  let id = 'synthetic-a'; let battery = 50;
+  const f = await fixture(t, { cooldownMs: 0, client: {
+    async listVehicles() { return [{ id, state: 'online' }]; },
+    async getVehicleData() { return { charge_state: { battery_level: battery, battery_range: 150 }, vin: 'PRIVATE' }; }
   } });
-  const response = await f.post('/api/capture', { vehicle: 1 }); assert.equal(response.status, 200); assert.equal(response.json.snapshot.alias, 'vehicle-1'); assert.equal(response.json.snapshot.charging_state, null); assert.equal(response.json.comparison.battery_percentage_point_delta, 2); assert.doesNotMatch(response.text, /PRIVATE|"vin"|"raw"/);
-  assert.deepEqual(commands, [['snapshot', '--vehicle', '1', '--json'], ['compare', '--vehicle', '1', '--json']]); assert.equal((await f.get('/api/garage')).json.request_count, 2);
+  const first = await f.post('/api/capture', { vehicle: 1 }); assert.equal(first.status, 200); assert.equal(first.json.comparison, null);
+  battery = 60;
+  const second = await f.post('/api/capture', { vehicle: 1 }); assert.equal(second.json.comparison.battery_percentage_point_delta, 10);
+  id = 'synthetic-b';
+  const reordered = await f.post('/api/capture', { vehicle: 1 }); assert.equal(reordered.status, 200); assert.equal(reordered.json.comparison, null);
+  assert.doesNotMatch(first.text + second.text + reordered.text, /PRIVATE|synthetic-|fingerprint/);
+  assert.equal((await f.get('/api/garage')).json.request_count, 6);
 });
 test('static symlinks cannot expose files outside allowlist', async t => {
   const f = await fixture(t, { mode: 'demo' });
@@ -168,15 +205,19 @@ test('chunked bodies are bounded and duplicate/forged headers are rejected', asy
   assert.equal(localhost.status, 200); assert.equal(calls, 1);
 });
 test('capture auth errors stay generic and non-online reads are blocked by narrow wrapper', async t => {
-  const f = await fixture(t, { client: { async listVehicles() { throw Object.assign(Error('private-access-token'), { code: 'AUTH_CONFIG' }); } }, run: async (_args, { client }) => {
-    try { await client.listVehicles(); } catch {} return 1;
-  } });
-  const response = await f.post('/api/capture', { vehicle: 1 });
-  assert.equal(response.status, 401); assert.equal(response.json.error, 'AUTH_REQUIRED'); assert.doesNotMatch(response.text, /private-access-token/);
-  assert.equal((await f.get('/api/garage')).json.request_count, 1);
+  for (const method of ['listVehicles', 'getVehicleData']) {
+    for (const code of ['AUTH_CONFIG', 'UNAUTHORIZED', 'TOKEN_REFRESH_FAILED', 'TOKEN_REFRESH_POISONED', 'TOKEN_REFRESH_LOCKED', 'NETWORK_ERROR']) {
+      const client = { async listVehicles() { return [{ id: 'synthetic-a', state: 'online' }]; }, async getVehicleData() { return {}; } };
+      client[method] = async () => { throw Object.assign(Error('private-access-token'), { name: 'FleetError', code }); };
+      const f = await fixture(t, { client });
+      const response = await f.post('/api/capture', { vehicle: 1 });
+      assert.equal(response.status, code === 'NETWORK_ERROR' ? 502 : 401); assert.equal(response.json.error, code === 'NETWORK_ERROR' ? 'UNAVAILABLE' : 'AUTH_REQUIRED'); assert.doesNotMatch(response.text, /private-access-token/);
+      assert.equal((await f.get('/api/garage')).json.request_count, method === 'listVehicles' ? 1 : 2);
+    }
+  }
   let dataReads = 0;
-  const x = await fixture(t, { client: { async getVehicleData() { dataReads++; } }, run: async (_args, { client }) => { await client.getVehicleData({ state: 'asleep' }); return 0; } });
-  assert.equal((await x.post('/api/capture', { vehicle: 1 })).status, 409); assert.equal(dataReads, 0);
+  const x = await fixture(t, { client: { async getVehicleData() { dataReads++; } }, captureSnapshot: async ({ client }) => { await client.getVehicleData({ state: 'asleep' }); } });
+  assert.equal((await x.post('/api/capture', { vehicle: 1 })).status, 409); assert.equal(dataReads, 0); assert.equal((await x.get('/api/garage')).json.request_count, 0);
 });
 test('failed refresh retains prior safe cache and failure cooldown prevents request storms', async t => {
   let time = stamp; let lists = 0;

@@ -30,6 +30,22 @@ function normalizeCharge(alias, vehicleState, data) {
     time_to_full_charge_hours: charging === 'Charging' ? number(charge.time_to_full_charge, 0, 168) : null
   };
 }
+// Revalidate already-normalized snapshots without converting or rounding their units.
+function sanitizeSnapshot(alias, value) {
+  const snapshot = object(value);
+  const charging = CHARGING_STATES.has(snapshot.charging_state) ? snapshot.charging_state : null;
+  return {
+    alias,
+    state: state(snapshot.state),
+    battery_percent: number(snapshot.battery_percent, 0, 100),
+    usable_battery_percent: number(snapshot.usable_battery_percent, 0, 100),
+    charge_limit_percent: number(snapshot.charge_limit_percent, 0, 100),
+    charging_state: charging,
+    charger_power_kw: number(snapshot.charger_power_kw, 0, 1000),
+    estimated_range_km: number(snapshot.estimated_range_km, 0, 2000 * MILES_TO_KM),
+    time_to_full_charge_hours: charging === 'Charging' ? number(snapshot.time_to_full_charge_hours, 0, 168) : null
+  };
+}
 function planCharging({ current, target, capacityKwh, powerKw, efficiency = 0.9, pricePerKwh }) {
   if (number(current, 0, 100) === null || number(target, current, 100) === null ||
       number(capacityKwh, Number.MIN_VALUE, Number.MAX_VALUE) === null ||
@@ -70,4 +86,4 @@ function compareSnapshots(previous, current) {
     charging_state: after.charging_state, caveat: CAVEAT
   };
 }
-module.exports = { normalizeCharge, planCharging, compareSnapshots, state, number, CAVEAT, ASSUMPTIONS };
+module.exports = { normalizeCharge, sanitizeSnapshot, planCharging, compareSnapshots, state, number, CAVEAT, ASSUMPTIONS };

@@ -5,7 +5,7 @@ const fs = require('node:fs/promises');
 const { constants } = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { normalizeCharge, compareSnapshots, number, CAVEAT } = require('./insights.cjs');
+const { normalizeCharge, sanitizeSnapshot, compareSnapshots, number, CAVEAT } = require('./insights.cjs');
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const HEADERS = { 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer', 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Content-Security-Policy': CSP };
 const NOTE = 'Aliases are ordinal positions, not persistent identities. Comparisons require two snapshots of the same vehicle. Request counts are high-level reads, not authoritative billing.';
@@ -14,16 +14,6 @@ const FILES = new Map([['/', ['index.html', 'text/html; charset=utf-8']], ['/app
 const object = v => v !== null && typeof v === 'object' && !Array.isArray(v);
 class HttpError extends Error { constructor(status, code) { super(code); this.status = status; this.code = code; } }
 const failure = (status, code) => { throw new HttpError(status, code); };
-function cleanSnapshot(value, ordinal) {
-  const v = object(value) ? value : {};
-  const clean = normalizeCharge('vehicle-' + ordinal, v.state, { charge_state: {
-    battery_level: v.battery_percent, usable_battery_level: v.usable_battery_percent,
-    charge_limit_soc: v.charge_limit_percent, charging_state: v.charging_state,
-    charger_power: v.charger_power_kw, time_to_full_charge: v.time_to_full_charge_hours
-  } });
-  clean.estimated_range_km = number(v.estimated_range_km, 0, 2000 * 1.609344);
-  return clean;
-}
 function cleanComparison(value, ordinal) {
   if (!object(value)) return null;
   const clean = { alias: 'vehicle-' + ordinal };
@@ -44,7 +34,6 @@ function createDashboardServer(options = {}) {
   const csrf = crypto.randomBytes(32).toString('hex');
   let fleet = options.client;
   let requestCount = 0;
-  let clientFailure;
   let boundPort;
   let starting;
   let pending;
@@ -68,12 +57,12 @@ function createDashboardServer(options = {}) {
     return {
       async listVehicles() {
         requestCount++; garage.request_count = requestCount;
-        try { return await fleet.listVehicles(); } catch (error) { clientFailure = error; throw error; }
+        return fleet.listVehicles();
       },
       async getVehicleData(vehicle) {
         if (vehicle?.state !== 'online') failure(409, 'UNAVAILABLE');
         requestCount++; garage.request_count = requestCount;
-        try { return await fleet.getVehicleData(vehicle); } catch (error) { clientFailure = error; throw error; }
+        return fleet.getVehicleData(vehicle);
       }
     };
   }
@@ -106,28 +95,22 @@ function createDashboardServer(options = {}) {
     if (mode === 'demo') {
       const vehicle = garage.vehicles[ordinal - 1];
       if (!vehicle) failure(404, 'VEHICLE_NOT_FOUND');
-      const snapshot = cleanSnapshot(vehicle, ordinal);
+      const snapshot = sanitizeSnapshot('vehicle-' + ordinal, vehicle);
       const record = { fingerprint: 'synthetic-' + ordinal, captured_at: timestamp(), snapshot };
       const previous = demoPrevious.get(ordinal);
       demoPrevious.set(ordinal, record);
       return { snapshot, comparison: previous ? cleanComparison(compareSnapshots(previous, record), ordinal) : null, note: NOTE };
     }
-    clientFailure = undefined;
-    const client = countedClient();
-    const run = options.run || require('./zappy.cjs').run;
-    async function invoke(command) {
-      let output = '';
-      const code = await run([command, '--vehicle', String(ordinal), '--json'], {
-        root, client, now, stdout: { write(text) { if (output.length < 65536) output += String(text); } }, stderr: { write() {} }
-      });
-      if (code !== 0) { if (AUTH_CODES.has(clientFailure?.code)) throw clientFailure; return null; }
-      try { return JSON.parse(output); } catch { return null; }
-    }
-    const snapshot = await invoke('snapshot');
+    const captureSnapshot = options.captureSnapshot || require('./zappy.cjs').captureSnapshot;
+    const loadComparison = options.loadComparison || require('./zappy.cjs').loadComparison;
+    const snapshot = await captureSnapshot({ root, client: countedClient(), ordinal, now });
     if (!object(snapshot)) failure(502, 'UNAVAILABLE');
-    const comparison = await invoke('compare');
-    return { snapshot: cleanSnapshot(snapshot, ordinal), comparison: cleanComparison(comparison, ordinal), note: NOTE };
+    let comparison = null;
+    // A first snapshot, invalid private history, or changed identity is not comparable.
+    try { comparison = await loadComparison({ root, ordinal }); } catch {}
+    return { snapshot: sanitizeSnapshot('vehicle-' + ordinal, snapshot), comparison: cleanComparison(comparison, ordinal), note: NOTE };
   }
+
   function manual(key, action) {
     if (pending) { if (pendingKey === key) return pending; failure(409, 'BUSY'); }
     if (Number(now()) - lastFinished < cooldownMs) failure(429, 'COOLDOWN');
@@ -189,9 +172,11 @@ function createDashboardServer(options = {}) {
         try { file = await staticFile(route); } catch { failure(404, 'NOT_FOUND'); }
         send(res, 200, file[0], file[1]); return;
       }
-      if (route === '/api/bootstrap' || route === '/api/garage') {
+      if (route === '/api/health' || route === '/api/bootstrap' || route === '/api/garage') {
         if (req.method !== 'GET') failure(405, 'METHOD_NOT_ALLOWED');
-        send(res, 200, route === '/api/bootstrap' ? { mode, csrf, garage: copy(garage) } : copy(garage)); return;
+        const value = route === '/api/health' ? { service: 'zappy-dashboard', mode }
+          : route === '/api/bootstrap' ? { mode, csrf, garage: copy(garage) } : copy(garage);
+        send(res, 200, value); return;
       }
       if (route !== '/api/refresh' && route !== '/api/capture') failure(404, 'NOT_FOUND');
       if (req.method !== 'POST') failure(405, 'METHOD_NOT_ALLOWED');
@@ -246,9 +231,11 @@ function createDashboardServer(options = {}) {
     }
   };
 }
-module.exports = { createDashboardServer };
-if (require.main === module) {
-  const args = process.argv.slice(2);
+async function runDashboardCli(args = process.argv.slice(2), options = {}) {
+  const stdout = options.stdout || process.stdout;
+  const stderr = options.stderr || process.stderr;
+  const usage = 'Usage: npm run dashboard -- [--demo] [--port N]\n';
+  if (args.length === 1 && args[0] === '--help') { stdout.write(usage); return { code: 0 }; }
   let mode = 'live'; let port = 8766; let valid = true; let seenPort = false; let seenDemo = false;
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--demo' && !seenDemo) { mode = 'demo'; seenDemo = true; }
@@ -256,12 +243,45 @@ if (require.main === module) {
     else valid = false;
   }
   if (!valid || !Number.isInteger(port) || port < 1 || port > 65535) {
-    process.stderr.write('Usage: node scripts/dashboard-server.cjs [--demo] [--port N]\n'); process.exitCode = 1;
-  } else {
-    const dashboard = createDashboardServer({ mode, port });
-    dashboard.start().then(({ url }) => process.stdout.write('Zappy dashboard: ' + url + '\n')).catch(() => {
-      process.stderr.write('Unable to start local dashboard.\n'); process.exitCode = 1;
-    });
-    for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => dashboard.close().catch(() => {}).finally(() => { process.exitCode = 0; }));
+    stderr.write(usage); return { code: 1 };
+  }
+  const url = 'http://localhost:' + port + '/';
+  const alternativePort = port === 8768 ? 8769 : 8768;
+  const alternative = 'npm run dashboard --' + (mode === 'demo' ? ' --demo' : '') + ' --port ' + alternativePort;
+  const dashboard = (options.createServer || createDashboardServer)({ mode, port });
+  try {
+    await dashboard.start();
+    stdout.write('Zappy dashboard: ' + url + '\nPress Ctrl-C to stop.\n');
+    return { code: 0, dashboard };
+  } catch (error) {
+    if (error?.code === 'EADDRINUSE') {
+      let existing;
+      try {
+        const response = await (options.fetch || globalThis.fetch)('http://127.0.0.1:' + port + '/api/health', {
+          redirect: 'error', signal: AbortSignal.timeout(1000)
+        });
+        if (response.ok) existing = await response.json();
+      } catch { /* An occupied port is not assumed to belong to Zappy. */ }
+      if (existing?.service === 'zappy-dashboard' && existing.mode === mode) {
+        stdout.write('Zappy is already running at ' + url + '\nNo second server was started. Stop the existing instance to load updated code.\n');
+        return { code: 0 };
+      }
+      if (existing?.service === 'zappy-dashboard' && ['live', 'demo'].includes(existing.mode)) {
+        stderr.write('Port ' + port + ' is running a Zappy ' + existing.mode + ' dashboard, not ' + mode + '.\n');
+      } else stderr.write('Port ' + port + ' is already in use by another or unrecognized service.\n');
+      stderr.write('Nothing was stopped. Choose a different port:\n  ' + alternative + '\n');
+    } else if (error?.code === 'EACCES' || error?.code === 'EPERM') {
+      stderr.write('Permission denied listening on 127.0.0.1:' + port + '. Try an unprivileged port:\n  ' + alternative + '\n');
+    } else {
+      stderr.write('Could not start Zappy on 127.0.0.1:' + port + '. Check local networking or try:\n  ' + alternative + '\n');
+    }
+    return { code: 1 };
   }
 }
+module.exports = { createDashboardServer, runDashboardCli };
+if (require.main === module) runDashboardCli().then(({ code, dashboard }) => {
+  process.exitCode = code;
+  if (dashboard) for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => dashboard.close().catch(() => {}).finally(() => { process.exitCode = 0; }));
+  }
+}).catch(() => { process.stderr.write('Dashboard startup failed. Run npm run dashboard -- --help for usage.\n'); process.exitCode = 1; });
