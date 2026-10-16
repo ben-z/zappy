@@ -20,8 +20,12 @@ No build step, no dependencies, no published secrets. Plain HTML, one JS file, o
 - Optional billing details were skipped. Future Fleet API usage can have charges;
   this setup does not configure a billing payment method or start polling.
 - North America partner registration succeeded and the registered public key was verified.
-- No private app exists yet. The callback destinations are reserved for that future app.
-  No owner OAuth login, vehicle pairing, vehicle commands, or energy controls were performed.
+- No private web app is deployed yet; the public relay destinations are reserved for it.
+- A localhost owner OAuth login succeeded with read-only vehicle information and
+  offline access. A real vehicle-list request and a live charge-state request both
+  returned HTTP 200 without configuring a payment method. Test results and tokens
+  remain local, not in this public repository.
+- No vehicle pairing, wake requests, vehicle commands, or energy controls were performed.
 
 ## Routes
 
@@ -167,8 +171,8 @@ node scripts/oauth-login.cjs [--timeout-seconds N]
 1. Reads `.local/tesla-credentials.json` (`client_id`, `client_secret`) at runtime.
 2. Listens on `127.0.0.1:8765` only and prints `http://localhost:8765/`.
 3. Opening that link redirects the browser to `https://auth.tesla.com/oauth2/v3/authorize`
-   (callback `http://localhost:8765/oauth-signin-redirect`, which must be an allowed
-   redirect URI for the Tesla app). Scope is fixed to
+   (callback `http://localhost:8765/oauth-signin-redirect`, registered alongside the
+   public callback on the Tesla app). Scope is fixed to
    `openid offline_access vehicle_device_data` (read-only).
 4. On the callback it checks state (constant-time), exchanges the code once at
    `https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token` (audience
@@ -184,3 +188,11 @@ input) with `no-store`, `no-referrer` and `default-src 'none'`. Credentials, cod
 state, verifier, authorization URL, callback URLs and tokens are never logged. The
 helper makes no vehicle API requests, wakes, or commands. Tests (`test/oauth.test.js`)
 mock the token fetch, use temp directories and an ephemeral port.
+
+The token file is private and must never be uploaded or pasted into chat. Check its
+`expires_at` field when using the access token. Re-running the login helper obtains
+fresh tokens and atomically replaces that file. The helper does not yet implement
+automatic token refresh; a future private API client should use Tesla's refresh-token
+grant and atomically save the newly returned refresh token, rather than reusing the
+old refresh token. Official flow:
+https://developer.tesla.com/docs/fleet-api/authentication/third-party-tokens
