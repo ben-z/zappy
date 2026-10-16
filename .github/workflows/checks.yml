@@ -1,0 +1,19 @@
+name: Tests and privacy checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Offline unit tests with synthetic data
+        run: npm test
+      - name: Audit publishable files
+        run: npm run privacy

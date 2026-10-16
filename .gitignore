@@ -8,3 +8,9 @@
 *.key
 .DS_Store
 node_modules/
+
+# Private exports, diagnostics, and local caches
+exports/
+*.log
+.cache/
+coverage/
